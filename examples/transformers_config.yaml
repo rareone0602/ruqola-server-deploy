@@ -1,0 +1,88 @@
+# Hugging Face Transformers Fine-tuning Configuration for H200 GPUs
+
+# Model configuration
+model:
+  name: "microsoft/DialoGPT-medium"  # Change to your desired model
+  use_lora: false  # Set to true for parameter-efficient fine-tuning
+  
+  # LoRA configuration (only used if use_lora: true)
+  lora:
+    rank: 16
+    alpha: 32
+    dropout: 0.1
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]  # Attention layers
+    bias: "none"
+
+# Dataset configuration
+dataset:
+  type: "huggingface"  # "huggingface" or "local"
+  name: "wikitext"     # Hugging Face dataset name
+  subset: "wikitext-103-raw-v1"  # Dataset subset
+  split: "train"       # Dataset split to use
+  text_column: "text"  # Column containing text data
+  validation_split: 0.1  # Create validation split if not exists
+  
+  # For instruction datasets, use this format instead:
+  # instruction_format:
+  #   instruction_column: "instruction"
+  #   response_column: "response"
+  #   template: "alpaca"  # "alpaca", "chat", or "simple"
+
+# Training configuration
+training:
+  # Output and logging
+  output_dir: "./transformers_results"
+  run_name: "transformers-h200-finetune"
+  
+  # Training schedule
+  epochs: 3
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  lr_scheduler_type: "cosine"
+  
+  # Batch size and memory optimization
+  per_device_batch_size: 4  # Will be auto-optimized based on model size
+  effective_batch_size: 32  # Achieved through gradient accumulation
+  max_length: 512
+  
+  # Precision and optimization
+  fp16: true
+  bf16: false  # Use bf16 instead of fp16 if supported
+  max_grad_norm: 1.0
+  
+  # Evaluation and saving
+  evaluation_strategy: "steps"
+  eval_steps: 500
+  save_strategy: "steps"
+  save_steps: 1000
+  save_total_limit: 3
+  logging_steps: 100
+  
+  # Early stopping (optional)
+  early_stopping:
+    patience: 3
+    threshold: 0.001
+  
+  # DeepSpeed configuration file (optional)
+  # deepspeed_config: "deepspeed_config.json"
+  
+  # Experiment tracking
+  report_to: ["tensorboard"]  # Options: "tensorboard", "wandb", "none"
+  
+  # Reproducibility
+  seed: 42
+
+# Weights & Biases configuration (optional)
+wandb:
+  enabled: false  # Set to true to enable W&B logging
+  project: "transformers-h200"
+  run_name: "finetune-experiment-1"
+
+# Hardware-specific optimizations for H200
+hardware:
+  # These are handled automatically by the script
+  # but you can override them here
+  auto_optimize_batch_size: true
+  memory_efficient_loading: true
+  gradient_checkpointing: true

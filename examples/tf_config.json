@@ -1,0 +1,46 @@
+{
+  "model": {
+    "num_classes": 10,
+    "dropout_rate": 0.1
+  },
+  
+  "training": {
+    "epochs": 100,
+    "batch_size": 128,
+    "seed": 42
+  },
+  
+  "optimizer": {
+    "type": "adamw",
+    "lr": 0.001,
+    "weight_decay": 0.01,
+    "beta_1": 0.9,
+    "beta_2": 0.999,
+    "epsilon": 1e-7
+  },
+  
+  "scheduler": {
+    "type": "cosine",
+    "min_lr": 0.00001
+  },
+  
+  "data": {
+    "augmentation": true,
+    "shuffle_buffer": 10000
+  },
+  
+  "checkpoint": {
+    "dir": "./tf_checkpoints",
+    "save_interval": 10
+  },
+  
+  "logging": {
+    "log_interval": 100,
+    "memory_log_interval": 500,
+    "tensorboard_dir": "./tf_logs"
+  },
+  
+  "mixed_precision": true,
+  "xla_compile": true,
+  "gpu_memory_limit": 100
+}

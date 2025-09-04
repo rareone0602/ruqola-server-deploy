@@ -1,0 +1,69 @@
+# LoRA (Low-Rank Adaptation) Fine-tuning Configuration
+
+# Base model configuration
+model:
+  name: "microsoft/DialoGPT-medium"  # Base model to fine-tune
+  quantization: null  # Options: null, "4bit", "8bit" for memory efficiency
+
+# LoRA configuration
+lora:
+  rank: 16           # LoRA rank (higher = more parameters, better performance)
+  alpha: 32          # LoRA scaling parameter (typically 2x rank)
+  dropout: 0.1       # LoRA dropout for regularization
+  bias: "none"       # Bias training: "none", "all", or "lora_only"
+  
+  # Target modules for LoRA (model-specific)
+  target_modules:
+    - "q_proj"       # Query projection
+    - "k_proj"       # Key projection  
+    - "v_proj"       # Value projection
+    - "o_proj"       # Output projection
+    # For LLaMA/Alpaca models, also add:
+    # - "gate_proj"
+    # - "up_proj" 
+    # - "down_proj"
+
+# Training configuration
+training:
+  output_dir: "./lora_results"
+  epochs: 3
+  batch_size: 4      # Can be higher with LoRA due to memory efficiency
+  learning_rate: 1e-4  # Higher LR typically works well with LoRA
+  max_length: 512    # Maximum sequence length
+  
+  # Advanced training options
+  warmup_steps: 100
+  weight_decay: 0.01
+  gradient_accumulation_steps: 4
+  
+  # Evaluation
+  eval_steps: 200
+  save_steps: 200
+  evaluation_strategy: "steps"
+
+# Dataset configuration
+dataset:
+  name: "alpaca"     # Built-in dataset name or path
+  type: "instruction"  # "instruction" or "text"
+  
+  # For custom datasets:
+  # name: "/path/to/your/dataset.json"
+  # format: "json"  # or "csv", "parquet", etc.
+  
+  # Dataset format for instruction datasets
+  instruction_column: "instruction"
+  input_column: "input"
+  response_column: "output"
+  template: "alpaca"  # "alpaca", "chat", or "simple"
+
+# Memory optimization (for large models)
+memory:
+  gradient_checkpointing: false  # Usually not needed with LoRA
+  use_4bit: false               # Enable 4-bit quantization
+  use_8bit: false               # Enable 8-bit quantization
+
+# Experiment tracking (optional)
+wandb:
+  enabled: false
+  project: "lora-finetuning"
+  run_name: "lora-experiment"

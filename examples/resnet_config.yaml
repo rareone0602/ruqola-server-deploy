@@ -1,0 +1,39 @@
+# PyTorch ResNet Training Configuration for H200
+# Usage: python pytorch_training.py --config resnet_config.yaml
+
+model:
+  num_classes: 10
+  pretrained: true
+
+training:
+  epochs: 100
+  batch_size: 128  # Optimized for H200 memory
+  seed: 42
+  mixed_precision: true  # Use FP16 for speed and memory efficiency
+  gradient_clip: 1.0     # Gradient clipping for stability
+
+optimizer:
+  type: "adamw"          # AdamW for better generalization
+  lr: 0.001
+  weight_decay: 0.01
+
+scheduler:
+  type: "cosine"         # Cosine annealing scheduler
+  min_lr: 0.00001
+
+data:
+  num_workers: 8         # Optimize for server CPU cores
+  dataset: "cifar10"
+
+checkpoint:
+  dir: "./checkpoints"
+  save_interval: 10      # Save every 10 epochs
+
+logging:
+  log_interval: 100      # Log every 100 batches
+
+# Optional: Weights & Biases integration
+wandb:
+  enabled: false         # Set to true to enable
+  project: "h200-training"
+  run_name: "resnet50-cifar10"
