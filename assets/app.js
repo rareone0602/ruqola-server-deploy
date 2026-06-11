@@ -119,6 +119,22 @@
     },
   });
 
+  // Require DOUBLE "~~" for strikethrough. By default GFM also treats a single
+  // "~" as strikethrough, but the docs use "~" for "approximately" (e.g. ~141 GB,
+  // ~564 GB total), which would otherwise render struck-through. Tildes inside
+  // code spans / fences are untouched (this only affects inline prose).
+  marked.use({
+    tokenizer: {
+      del: function (src) {
+        var m = /^~~(?=\S)([\s\S]*?\S)~~/.exec(src);
+        if (m) {
+          return { type: "del", raw: m[0], text: m[1], tokens: this.lexer.inlineTokens(m[1]) };
+        }
+        // no match -> single "~" falls through to plain text
+      },
+    },
+  });
+
   var cache = {};
   function fetchDoc(path) {
     if (cache[path]) return Promise.resolve(cache[path]);
