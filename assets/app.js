@@ -33,10 +33,12 @@
     { id: "hopper", label: "Hopper (NUS)", docs: [
       { title: "Hopper Access", path: "docs/hopper.md" },
     ]},
-    { id: "admin", label: "Admin", docs: [
-      { title: "User Creation", path: "docs/users-creation.md" },
-      { title: "User Quotas", path: "docs/users-quota.md" },
-    ]},
+    // Admin tab temporarily hidden from the site (docs remain in the repo under
+    // docs/users-creation.md and docs/users-quota.md). Re-enable by uncommenting.
+    // { id: "admin", label: "Admin", docs: [
+    //   { title: "User Creation", path: "docs/users-creation.md" },
+    //   { title: "User Quotas", path: "docs/users-quota.md" },
+    // ]},
     { id: "help", label: "Troubleshooting", docs: [
       { title: "Troubleshooting", path: "docs/troubleshooting.md" },
     ]},
@@ -98,6 +100,7 @@
 
   // ---- Elements ----
   var elTabs = document.getElementById("tabs");
+  var elLayout = document.querySelector(".layout");
   var elSidebar = document.getElementById("sidebar");
   var elContent = document.getElementById("content");
   var elToc = document.getElementById("toc");
@@ -140,8 +143,15 @@
   // ---- Render sidebar for a tab ----
   function renderSidebar(tab, activeSlug) {
     elSidebar.innerHTML = "";
-    if (tab.docs.length <= 1) { elSidebar.style.display = "none"; return; }
+    // Single-doc tabs hide the sidebar; tell the grid to drop its column so the
+    // content doesn't auto-flow into the now-empty sidebar track.
+    if (tab.docs.length <= 1) {
+      elSidebar.style.display = "none";
+      elLayout.classList.add("no-sidebar");
+      return;
+    }
     elSidebar.style.display = "";
+    elLayout.classList.remove("no-sidebar");
     var h = document.createElement("h3");
     h.textContent = tab.label;
     elSidebar.appendChild(h);

@@ -43,7 +43,6 @@ launch GPU work through `gpuq` — jobs started outside it are flagged by
 - Framework setup → [PyTorch](pytorch-guide.md) · [TensorFlow](tensorflow-guide.md) · [JAX](jax-guide.md) · [Transformers](transformers-guide.md) · [Examples](../examples/README.md)
 - Hardware detail → [H200 Specs](h200-specs.md)
 - Something broke → [Troubleshooting](troubleshooting.md)
-- Admins → [User Creation](users-creation.md), [User Quotas](users-quota.md)
 
 ---
 

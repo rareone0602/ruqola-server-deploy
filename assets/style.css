@@ -88,6 +88,9 @@ body {
   gap: 0; align-items: start;
   max-width: 1400px; margin: 0 auto;
 }
+/* Single-doc tabs hide the sidebar (JS adds .no-sidebar): drop that column so the
+   content stays in the main track instead of collapsing into the sidebar width. */
+.layout.no-sidebar { grid-template-columns: minmax(0, 1fr) 220px; }
 .sidebar {
   position: sticky; top: var(--topbar-h);
   height: calc(100vh - var(--topbar-h)); overflow-y: auto;
@@ -169,10 +172,11 @@ body {
 /* ---- Responsive ---- */
 @media (max-width: 1080px) {
   .layout { grid-template-columns: 220px minmax(0,1fr); }
+  .layout.no-sidebar { grid-template-columns: minmax(0,1fr); }
   .toc { display: none; }
 }
 @media (max-width: 760px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout, .layout.no-sidebar { grid-template-columns: 1fr; }
   .sidebar {
     position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border);
     display: flex; flex-wrap: wrap; gap: 4px; padding: 10px;
