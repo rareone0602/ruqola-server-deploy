@@ -1,0 +1,9 @@
+{
+  "gpus": [
+    {"index": 0, "name": "Fake-GPU-A", "uuid": "GPU-aaaa",
+     "memory_used_mb": 0, "memory_total_mb": 81920, "utilization": 0},
+    {"index": 1, "name": "Fake-GPU-B", "uuid": "GPU-bbbb",
+     "memory_used_mb": 0, "memory_total_mb": 81920, "utilization": 0}
+  ],
+  "compute_apps": []
+}

@@ -2,6 +2,8 @@
 
 Complete guide for optimizing PyTorch workflows on the Ruqola server's H200 GPUs.
 
+The server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices 0,1,2,3), each with ~141 GB of VRAM (~564 GB total). They are Hopper-class cards (compute capability 9.0, sm_90). The host runs Ubuntu 24.04 LTS with GPU driver 575.57.08 (CUDA 12.9), 256 logical CPUs, and 755 GiB of system RAM.
+
 ## 📖 Table of Contents
 
 1. [Setup and Installation](#setup-and-installation)
@@ -19,18 +21,23 @@ Complete guide for optimizing PyTorch workflows on the Ruqola server's H200 GPUs
 ### Recommended PyTorch Installation
 
 ```bash
-# CUDA 12.1 compatible PyTorch (recommended for H200)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Current CUDA 12.x PyTorch wheel.
+# The host driver is 575.57.08 (CUDA 12.9), so any cu12x wheel is forward-compatible,
+# and all current PyTorch wheels include Hopper sm_90 kernels for the H200 NVL.
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 # Or with conda
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
 ```
+
+> The `cu126`/`cu128` wheels also work and may be preferable for the latest cuDNN/Hopper
+> optimizations — pick whichever the current PyTorch release publishes. Avoid pinning to an
+> old `cu121` build; while it still runs on a 12.9 driver, it leaves Hopper performance on the table.
 
 ### Verify Installation
 
 ```python
 import torch
-import torch.cuda
 
 # Check PyTorch and CUDA versions
 print(f"PyTorch version: {torch.__version__}")
@@ -47,16 +54,24 @@ for i in range(torch.cuda.device_count()):
     print(f"  Multiprocessors: {props.multi_processor_count}")
 ```
 
+On this server you should see 4 GPUs, each reporting ~140 GB and compute capability 9.0.
+
 ### Environment Setup
 
 Add to your `~/.bashrc` or job submission script:
 
 ```bash
 # CUDA environment variables for H200
-export CUDA_VISIBLE_DEVICES=0  # Use first GPU, or 0,1,2 for all
+export CUDA_VISIBLE_DEVICES=0  # Use first GPU, or 0,1,2,3 for all 4
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 ```
+
+> **Caution under gpuq:** Do **not** set `CUDA_VISIBLE_DEVICES` manually when running through
+> `gpuq submit`. gpuq sets it for you to the GPU(s) it allocated, and overriding it makes your job
+> run on a different physical GPU than the one you were granted — `gpuq audit` detects this rebind
+> and will warn (and eventually kill) the job. Set `CUDA_VISIBLE_DEVICES` by hand only for
+> interactive/non-gpuq experiments.
 
 ## Basic GPU Usage
 
@@ -137,11 +152,11 @@ for batch_idx, (data, target) in enumerate(train_loader):
 ### Automatic Mixed Precision (AMP)
 
 ```python
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 
 model = MyModel().cuda()
 optimizer = optim.AdamW(model.parameters())
-scaler = GradScaler()
+scaler = GradScaler('cuda')
 
 for data, target in dataloader:
     data, target = data.cuda(), target.cuda()
@@ -149,7 +164,7 @@ for data, target in dataloader:
     optimizer.zero_grad()
     
     # Mixed precision forward pass
-    with autocast():
+    with autocast('cuda'):
         output = model(data)
         loss = criterion(output, target)
     
@@ -158,6 +173,19 @@ for data, target in dataloader:
     scaler.step(optimizer)
     scaler.update()
 ```
+
+> Use `torch.amp.autocast('cuda', ...)` / `torch.amp.GradScaler('cuda')`; the older
+> `torch.cuda.amp.*` API is deprecated and emits `FutureWarning`. On Hopper the preferred
+> choice is **BF16** autocast (`with autocast('cuda', dtype=torch.bfloat16): ...`), which has the
+> same dynamic range as FP32 and therefore needs **no** `GradScaler` at all:
+>
+> ```python
+> with autocast('cuda', dtype=torch.bfloat16):
+>     output = model(data)
+>     loss = criterion(output, target)
+> loss.backward()       # no scaler needed for bf16
+> optimizer.step()
+> ```
 
 ### Gradient Checkpointing
 
@@ -174,14 +202,24 @@ class MemoryEfficientModel(nn.Module):
     def forward(self, x):
         # Use checkpointing for memory efficiency
         for layer in self.layers:
-            x = checkpoint.checkpoint(layer, x)
+            x = checkpoint.checkpoint(layer, x, use_reentrant=False)
         return x
 
-# Or use built-in checkpointing
-model = torch.utils.checkpoint.checkpoint_sequential(
-    layers, segments=4, input=x
-)
+# Or use checkpoint_sequential inside forward(): it returns the OUTPUT tensor of
+# running `x` through the segments (it is not a reusable model object).
+class SequentialCheckpointModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.Sequential(*[nn.Linear(1024, 1024) for _ in range(10)])
+
+    def forward(self, x):
+        return torch.utils.checkpoint.checkpoint_sequential(
+            self.layers, segments=4, input=x, use_reentrant=False
+        )
 ```
+
+> Pass `use_reentrant=False` explicitly — current PyTorch warns when it is omitted, and the
+> non-reentrant implementation is the recommended one.
 
 ### Dynamic Memory Allocation
 
@@ -199,7 +237,7 @@ torch.backends.cudnn.enabled = True
 # Memory-efficient data types
 model = model.half()  # Use FP16
 # or
-model = model.bfloat16()  # Use BF16 (better for training)
+model = model.bfloat16()  # Use BF16 (better for training, preferred on Hopper)
 ```
 
 ### Large Batch Sizes with Gradient Accumulation
@@ -212,7 +250,7 @@ def train_with_gradient_accumulation(model, dataloader, accumulation_steps=4):
     for batch_idx, (data, target) in enumerate(dataloader):
         data, target = data.cuda(), target.cuda()
         
-        with autocast():
+        with autocast('cuda'):
             output = model(data)
             loss = criterion(output, target) / accumulation_steps
         
@@ -231,19 +269,24 @@ def train_with_gradient_accumulation(model, dataloader, accumulation_steps=4):
 ### Tensor Core Optimization
 
 ```python
-# Ensure tensor dimensions are multiples of 8 for Tensor Core usage
-def optimize_tensor_shapes(batch_size, seq_len, hidden_dim):
-    # Round up to nearest multiple of 8
-    batch_size = ((batch_size + 7) // 8) * 8
-    seq_len = ((seq_len + 7) // 8) * 8
-    hidden_dim = ((hidden_dim + 7) // 8) * 8
-    return batch_size, seq_len, hidden_dim
+# Align tensor dimensions for Tensor Core usage.
+# Classic FP16 rule of thumb is multiples of 8; on Hopper with BF16/TF32, aligning to
+# multiples of 16 (and ideally 64 for best memory coalescing) is the more current guideline.
+def optimize_tensor_shapes(batch_size, seq_len, hidden_dim, align=16):
+    def round_up(n):
+        return ((n + align - 1) // align) * align
+    return round_up(batch_size), round_up(seq_len), round_up(hidden_dim)
 
 # Use Tensor Core friendly operations
-x = torch.randn(64, 2048, dtype=torch.half, device='cuda')  # Multiple of 8
-linear = nn.Linear(2048, 4096).half().cuda()  # Multiple of 8
+x = torch.randn(64, 2048, dtype=torch.bfloat16, device='cuda')  # aligned to 16
+linear = nn.Linear(2048, 4096).bfloat16().cuda()                # aligned to 16
 output = linear(x)  # Uses Tensor Cores
 ```
+
+> Each H200 NVL reaches roughly **~836 TFLOP/s** of dense BF16 tensor-core matmul (empirical on
+> this server; the datasheet quotes ~989 TFLOP/s FP16 with sparsity). That is the figure to plan
+> around — not the much smaller non-tensor CUDA-core number. Keep matmul dimensions aligned to
+> make use of that throughput.
 
 ### Optimized Data Loading
 
@@ -253,7 +296,7 @@ def create_optimized_dataloader(dataset, batch_size=128):
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=8,  # Match available CPU cores
+        num_workers=8,  # conservative; the box has 256 logical CPUs shared among users — scale up cautiously
         pin_memory=True,  # Faster GPU transfer
         persistent_workers=True,  # Reduce worker overhead
         prefetch_factor=2,  # Prefetch batches
@@ -354,20 +397,38 @@ def train_ddp(rank, world_size):
             loss.backward()
             optimizer.step()
 
-# Launch with torchrun
-# torchrun --nproc_per_node=3 train_script.py
+# Launch with torchrun; --nproc_per_node must equal the number of GPUs you were
+# allocated (gpuq sets CUDA_VISIBLE_DEVICES for you) and match the --gpus value you
+# passed to `gpuq submit`. Max 4 on this server.
+# torchrun --nproc_per_node=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .) train_script.py
+# (or just set it to your --gpus value, e.g. --nproc_per_node=4 for the full node)
 ```
 
 ### GPU Queue Multi-GPU Job
 
 ```bash
-# Submit multi-GPU job
+# Submit a multi-GPU job. gpuq runs it in the FOREGROUND in this terminal until it
+# finishes; there is no daemon and no per-job log files — redirect output yourself if
+# you want a log (e.g. append `> run.log 2>&1`).
 gpuq submit \
   --command "torchrun --nproc_per_node=2 train_distributed.py" \
   --gpus 2 \
   --memory 60 \
   --time 12
+
+# To use the whole node (all 4 H200s):
+gpuq submit \
+  --command "torchrun --nproc_per_node=4 train_distributed.py" \
+  --gpus 4 \
+  --memory 60 \
+  --time 12
 ```
+
+> `-m/--memory` is the **minimum free VRAM** (in GB) a GPU must have to be selected for your
+> job — an admission requirement, not a hard cap your job is held to. gpuq sets
+> `CUDA_VISIBLE_DEVICES` to the GPUs it picks, so keep `--nproc_per_node` equal to your `--gpus`
+> count. You own the GPUs you are allocated: you may stack more of your own jobs on them, but GPUs
+> held by other users are off-limits until they free them.
 
 ## Large Model Training
 
@@ -413,10 +474,8 @@ class LargeModel(nn.Module):
 deepspeed_config = {
     "train_batch_size": 64,
     "gradient_accumulation_steps": 2,
-    "fp16": {
-        "enabled": True,
-        "loss_scale": 0,
-        "initial_scale_power": 16
+    "bf16": {
+        "enabled": True  # BF16 preferred on Hopper (no loss scaling needed)
     },
     "zero_optimization": {
         "stage": 2,  # ZeRO Stage 2 for memory efficiency
@@ -456,13 +515,16 @@ from transformers import (
     Trainer
 )
 
-# Load large model efficiently
+# Load a model. With ~141 GB per H200, a single card holds DialoGPT-large easily —
+# no sharding needed. (device_map="auto" requires the `accelerate` package and shards
+# the model across GPUs for inference; it is generally not used with the Trainer for training.)
 model = AutoModelForCausalLM.from_pretrained(
     "microsoft/DialoGPT-large",
-    torch_dtype=torch.float16,
-    device_map="auto",  # Automatic device placement
-    gradient_checkpointing=True,
+    torch_dtype=torch.bfloat16,  # BF16 preferred on Hopper
 )
+
+# Enable gradient checkpointing on the model (it is NOT a from_pretrained kwarg)...
+model.gradient_checkpointing_enable()
 
 # Training arguments optimized for H200
 training_args = TrainingArguments(
@@ -470,7 +532,9 @@ training_args = TrainingArguments(
     per_device_train_batch_size=8,
     gradient_accumulation_steps=4,
     num_train_epochs=3,
-    fp16=True,
+    bf16=True,                     # BF16 on Hopper
+    gradient_checkpointing=True,   # ...or enable it here instead
+    eval_strategy="steps",         # NOTE: evaluation_strategy is deprecated/removed
     dataloader_pin_memory=True,
     dataloader_num_workers=8,
     save_strategy="steps",
@@ -488,6 +552,9 @@ trainer = Trainer(
 trainer.train()
 ```
 
+> Set the Hugging Face cache via `HF_HOME` (the old `TRANSFORMERS_CACHE` is deprecated), e.g.
+> `export HF_HOME=/path/to/large/scratch/hf_cache` so model downloads land on a roomy filesystem.
+
 ## Advanced Techniques
 
 ### Memory Mapping for Large Datasets
@@ -498,8 +565,9 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
 class MemoryMappedDataset(Dataset):
-    def __init__(self, data_file, mmap_mode='r'):
+    def __init__(self, data_file, feature_size, mmap_mode='r'):
         # Memory-map large datasets
+        self.feature_size = feature_size
         self.data = np.memmap(data_file, dtype='float32', mode=mmap_mode)
         self.length = len(self.data) // self.feature_size
     
@@ -535,6 +603,10 @@ class DynamicLossScaler:
                 self.scale *= self.scale_factor
         self.counter += 1
 ```
+
+> In practice, prefer the built-in `torch.amp.GradScaler('cuda')` for FP16 — and remember that
+> BF16 (the recommended dtype on Hopper) does not need loss scaling at all. The class above is
+> illustrative.
 
 ### Custom Optimizers
 
@@ -592,7 +664,7 @@ def profile_memory_usage():
 ```python
 import threading
 import time
-import nvidia_ml_py3 as nvml
+import pynvml as nvml  # pip install nvidia-ml-py (the official binding)
 
 def monitor_gpu_utilization():
     nvml.nvmlInit()
@@ -616,6 +688,9 @@ def monitor_gpu_utilization():
     monitor_thread.daemon = True
     monitor_thread.start()
 ```
+
+> Use the official `nvidia-ml-py` package (imported as `pynvml`); the old `nvidia_ml_py3` fork is
+> unmaintained and may be out of sync with the installed driver (575.x).
 
 ### Debugging CUDA Errors
 
@@ -655,7 +730,7 @@ Usage: gpuq submit --command "python train_h200.py --config config.yaml" --gpus 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import argparse
 import yaml
 import logging
@@ -710,7 +785,7 @@ def train_epoch(model, dataloader, optimizer, criterion, scaler, config):
         
         optimizer.zero_grad()
         
-        with autocast(enabled=config['training']['mixed_precision']):
+        with autocast('cuda', enabled=config['training']['mixed_precision']):
             output = model(data)
             loss = criterion(output, target)
         
@@ -754,7 +829,7 @@ def main():
     model = create_model(config)
     optimizer = optim.AdamW(model.parameters(), **config['optimizer'])
     criterion = nn.CrossEntropyLoss()
-    scaler = GradScaler(enabled=config['training']['mixed_precision'])
+    scaler = GradScaler('cuda', enabled=config['training']['mixed_precision'])
     
     # Create dataloader
     train_loader = create_dataloader(config)
@@ -798,7 +873,7 @@ dataset:
   transform: "standard"
   
 training:
-  batch_size: 128  # Optimize for H200 memory
+  batch_size: 128  # Optimize for H200 memory (~141 GB per card)
   epochs: 100
   seed: 42
   mixed_precision: true
@@ -808,7 +883,7 @@ optimizer:
   weight_decay: 0.01
   
 dataloader:
-  num_workers: 8
+  num_workers: 8  # conservative; the box has 256 logical CPUs shared among users
   
 checkpoint:
   dir: "./checkpoints"
@@ -828,18 +903,20 @@ logging:
 SCRIPT_PATH="train_h200.py"
 CONFIG_PATH="config.yaml"
 GPUS=1
-MEMORY=60  # GB
+MEMORY=60  # GB minimum free VRAM a candidate GPU must have
 TIME=12    # hours
 
-# Submit job
+# Submit the job. gpuq runs it in the FOREGROUND in this terminal until it finishes;
+# there is no daemon and no per-job log files — redirect output yourself if you want a log.
+# gpuq notifies you on completion at the email read from your account; --notify only overrides it.
 gpuq submit \
   --command "python $SCRIPT_PATH --config $CONFIG_PATH" \
   --gpus $GPUS \
   --memory $MEMORY \
   --time $TIME \
-  --email "your-email@example.com"
+  --notify "your-email@example.com"
 
-echo "Job submitted! Check status with: gpuq status"
+echo "Job finished! Check current state any time with: gpuq status"
 ```
 
 ---

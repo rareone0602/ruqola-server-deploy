@@ -44,18 +44,24 @@ def setup_gpu(config):
     
     if gpus:
         try:
-            # Enable memory growth to avoid allocating all GPU memory at once
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            
-            # Set memory limit if specified in config
+            # A hard memory cap and memory growth are mutually exclusive on the
+            # same GPU, so pick one based on whether a limit is configured.
             if config.get('gpu_memory_limit'):
-                tf.config.experimental.set_memory_limit(
-                    gpus[0], 
-                    config['gpu_memory_limit'] * 1024
+                # Cap memory via a logical device configuration (in MB)
+                tf.config.set_logical_device_configuration(
+                    gpus[0],
+                    [tf.config.LogicalDeviceConfiguration(
+                        memory_limit=config['gpu_memory_limit'] * 1024
+                    )]
                 )
-            
-            logging.info(f"Configured {len(gpus)} GPUs with memory growth enabled")
+                logging.info(
+                    f"Configured GPU:0 with a {config['gpu_memory_limit']}GB memory limit"
+                )
+            else:
+                # Enable memory growth to avoid allocating all GPU memory at once
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                logging.info(f"Configured {len(gpus)} GPUs with memory growth enabled")
             
             # Enable mixed precision if specified
             if config.get('mixed_precision', True):

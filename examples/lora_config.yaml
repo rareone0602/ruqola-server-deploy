@@ -39,7 +39,7 @@ training:
   # Evaluation
   eval_steps: 200
   save_steps: 200
-  evaluation_strategy: "steps"
+  eval_strategy: "steps"
 
 # Dataset configuration
 dataset:

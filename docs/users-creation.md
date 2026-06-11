@@ -7,7 +7,7 @@ This script can be used in two distinct ways:
 ```bash
 add_users.sh users.csv
 ```
-where users.csv is a csv file containing with columns named as follow: 
+where users.csv is a CSV file with columns named as follows:
 - username: the username of each user to be created
 - password: the provisional password for each user (the password will be changed at the first login as explained below)
 - full_name: the full name of each user
@@ -48,10 +48,12 @@ This script can be used in two distinct ways:
 ```bash
 delete_users.sh users.csv
 ```
-where users.csv is a csv file containing with columns named as follow: 
-- username: the username of each user to be created
+where users.csv is a CSV file with columns named as follows:
+- username: the username of each user to be deleted
 
-2) For single user addition, run the following:
+Only the username column is read for deletion; any other columns (e.g. a leftover password or full_name from a creation CSV) are ignored.
+
+2) For single user deletion, run the following:
 ```bash
 delete_users.sh --single username
 ```
@@ -59,14 +61,20 @@ where username is also here the username of the user to be deleted.
 
 Once run, the script will ask to confirm and, if so, press and enter "y" to confirm and "n" to cancel the operation.
 
-By default, the script will save a backup copy of the users' files that have been deleted. In order not to save such a backup, add the following argument:
+By default, the script will save a backup copy of the deleted users' files (home and scratch directories) under /var/backups/deleted_users. In order not to save such a backup, add the `--no-backup` argument.
+
+For the single user case, append `--no-backup` directly:
+
+```bash
+delete_users.sh --single username --no-backup
+```
+
+For the bulk case, `--no-backup` works whether you pass the CSV positionally or with the explicit `--csv` flag. Both of the following suppress the backup:
 
 ```bash
 delete_users.sh users.csv --no-backup
 ```
 
-And, equally, in the single user case:
-
 ```bash
-delete_users.sh --single username --no-backup
+delete_users.sh --csv users.csv --no-backup
 ```

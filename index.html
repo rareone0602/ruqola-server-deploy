@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ruqola Server Docs · Mjölnir (NTU) & Hopper (NUS)</title>
+  <meta name="description" content="Documentation for the Ruqola project compute servers: the NTU Mjölnir H200 server (gpuq queue) and the NUS Hopper HPC cluster." />
+  <link rel="stylesheet" href="assets/vendor/hl-github.min.css" id="hl-light" />
+  <link rel="stylesheet" href="assets/vendor/hl-github-dark.min.css" id="hl-dark" disabled />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="hammer">⚒</span> Ruqola Docs</div>
+    <nav class="tabs" id="tabs" aria-label="Sections"></nav>
+    <div class="actions">
+      <span class="search-wrap">
+        <input id="search" type="search" placeholder="Find a page…" aria-label="Search pages" autocomplete="off" />
+        <span class="search-results" id="search-results"></span>
+      </span>
+      <button id="theme" title="Toggle light/dark" aria-label="Toggle theme">☾</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar" aria-label="Page navigation"></aside>
+    <main class="content" id="content"></main>
+    <nav class="toc" id="toc" aria-label="Table of contents"></nav>
+  </div>
+
+  <noscript>
+    <p style="padding:24px">This documentation site renders Markdown in your browser and
+    needs JavaScript. The raw docs are in the <code>docs/</code>, <code>gpuq/</code>, and
+    <code>examples/</code> folders of this repository.</p>
+  </noscript>
+
+  <script src="assets/vendor/marked.min.js"></script>
+  <script src="assets/vendor/highlight.min.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

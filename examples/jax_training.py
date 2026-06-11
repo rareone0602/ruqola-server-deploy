@@ -18,7 +18,7 @@ Features:
 import jax
 import jax.numpy as jnp
 from jax import random, grad, jit, vmap, pmap, devices
-from jax.experimental import remat
+from jax import checkpoint as remat
 import flax.linen as nn
 from flax.training import train_state
 import optax

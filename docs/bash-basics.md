@@ -78,11 +78,12 @@ find . -type d -name "models"   # directories only
 # Find recent files
 find . -mtime -1                # files modified in last day
 find . -mtime +7                # files older than 7 days
-
-# Locate command (faster, uses database)
-locate filename
-updatedb            # update locate database (as admin)
 ```
+
+> **Note:** `locate`/`updatedb` are **not** installed on this server by default —
+> running them returns `command not found`. Use `find` (shown above) instead. If
+> you really want a `locate` database you can install one yourself with
+> `sudo apt install plocate` (requires sudo).
 
 ### Permissions
 
@@ -170,6 +171,11 @@ killall python                 # kill all python processes
 
 ### Screen and Tmux (Session Management)
 
+Because `gpuq submit` runs your job in the **foreground** of the terminal you
+launched it from (there is no background daemon), a terminal multiplexer like
+`screen` or `tmux` is the recommended way to keep a long job alive after you
+disconnect. Start the job inside a session, detach, and reattach later.
+
 ```bash
 # Screen
 screen                          # start new screen session
@@ -215,9 +221,16 @@ echo $PWD                       # current directory
 echo $OLDPWD                    # previous directory
 
 # CUDA-related (for GPU computing)
-export CUDA_VISIBLE_DEVICES=0,1    # use GPUs 0 and 1
+# This server has 4 H200 GPUs, indices 0,1,2,3.
+export CUDA_VISIBLE_DEVICES=0,1      # use GPUs 0 and 1
+export CUDA_VISIBLE_DEVICES=0,1,2,3  # use all four GPUs
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 ```
+
+> **Tip:** Prefer letting `gpuq` choose your GPUs over setting
+> `CUDA_VISIBLE_DEVICES` by hand. When you run a job through the queue it sets
+> this variable for you to match the GPU(s) it allocated, which avoids clashing
+> with cards other users already hold.
 
 ## SSH and Remote Access
 
@@ -229,7 +242,7 @@ ssh username@server.com
 ssh -p 2222 username@server.com # custom port
 
 # SSH with key
-ssh-keygen -t rsa               # generate SSH key pair
+ssh-keygen -t ed25519           # generate SSH key pair (ed25519 recommended)
 ssh-copy-id username@server.com # copy public key to server
 
 # File transfer
@@ -298,23 +311,32 @@ mkcd() { mkdir -p "$1" && cd "$1"; }  # make directory and cd into it
 
 ```bash
 # NVIDIA commands
-nvidia-smi                      # GPU status
+nvidia-smi                      # GPU status (shows all 4 H200 GPUs)
 nvidia-smi -l 1                 # continuous monitoring (1-second intervals)
 nvidia-smi -q                   # detailed GPU info
 
-# Our custom queue system
-gpuq status                     # check queue status
-gpuq submit --command "python train.py" --gpus 1
-gpuq kill --job-id 12345        # kill specific job
+# Our custom queue system (gpuq)
+gpuq status                     # check queue and GPU ownership
+gpuq submit -- python train.py  # canonical form; --gpus defaults to 1
+gpuq submit -g 1 -- python train.py        # request 1 GPU explicitly
+gpuq submit --command "python train.py"    # equivalent --command form
+gpuq kill 12345                 # kill one of your jobs by id
+gpuq kill --job-id 12345        # same, using the flag form
 ```
+
+Your job runs in the **foreground** of the terminal — gpuq has no daemon and
+writes no per-job log files, so its output goes straight to your screen. Redirect
+it yourself if you want a log (`gpuq submit -- python train.py > train.log 2>&1`),
+and run inside `screen`/`tmux` for long jobs. See the
+[GPU Queue Guide](gpu-queue-guide.md) for full details.
 
 ### System Information
 
 ```bash
 # Hardware info
-lscpu                           # CPU information
-lsmem                           # memory information
-lspci | grep -i nvidia          # GPU information
+lscpu                           # CPU information (256 logical CPUs on this host)
+lsmem                           # memory information (~755 GiB RAM)
+lspci | grep -i nvidia          # GPU information (4x H200 NVL)
 df -h                           # disk usage
 free -h                         # memory usage
 uptime                          # system uptime and load
@@ -323,7 +345,7 @@ uptime                          # system uptime and load
 ### Package Management (if you have sudo access)
 
 ```bash
-# Ubuntu/Debian
+# Ubuntu/Debian (this server runs Ubuntu 24.04 LTS)
 apt update                      # update package list
 apt install package-name        # install package
 apt search keyword              # search packages
@@ -353,10 +375,15 @@ pip show package-name           # show package info
 
 ### GPU Usage Etiquette
 
-1. **Check availability first**: `gpuq status` before submitting jobs
-2. **Specify resource requirements**: Don't request more than you need
-3. **Monitor your jobs**: Check progress regularly
-4. **Clean up finished jobs**: Kill completed or failed processes
+1. **Check status first**: `gpuq status` before submitting jobs
+2. **Specify resource requirements**: Don't request more GPUs than you need
+3. **You own the GPUs gpuq allocates to you**: you can stack additional jobs onto
+   cards you already hold, but cards held by other users are off-limits until they
+   free them. There is also a rolling weekly (7-day) GPU-hour quota — see the
+   [GPU Queue Guide](gpu-queue-guide.md).
+4. **Keep long jobs in `screen`/`tmux`**: gpuq jobs run in the foreground, so a
+   multiplexer keeps them alive if you disconnect.
+5. **Clean up finished jobs**: Kill completed or failed jobs you no longer need.
 
 ## Quick Reference Card
 
@@ -366,9 +393,9 @@ pwd                             # where am I?
 ls -la                          # what's here?
 cd directory                    # go somewhere
 cp file.txt backup.txt          # make a copy
-nvidia-smi                      # check GPUs
+nvidia-smi                      # check GPUs (4x H200)
 gpuq status                     # check queue
-gpuq submit --command "python train.py" --gpus 1
+gpuq submit -- python train.py  # run a job (1 GPU by default)
 top                             # what's running?
 kill PID                        # stop a process
 ```

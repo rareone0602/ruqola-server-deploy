@@ -285,7 +285,7 @@ class LoRATrainer:
             logging_steps=10,
             save_strategy="steps",
             save_steps=200,
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             eval_steps=200,
             save_total_limit=3,
             

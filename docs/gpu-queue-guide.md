@@ -1,37 +1,46 @@
 # GPU Queue System User Guide
 
-Comprehensive guide to using the Ruqola server's custom GPU queue management system for efficient resource sharing.
+Comprehensive guide to using the Ruqola server's custom GPU queue management system (`gpuq`) for efficient resource sharing.
 
 ## 📖 Table of Contents
 
 1. [Overview](#overview)
 2. [Basic Usage](#basic-usage)
 3. [Job Submission](#job-submission)
-4. [Monitoring and Management](#monitoring-and-management)
-5. [Advanced Usage](#advanced-usage)
-6. [Best Practices](#best-practices)
-7. [Common Workflows](#common-workflows)
-8. [Troubleshooting](#troubleshooting)
+4. [Choosing Which GPU](#choosing-which-gpu)
+5. [Monitoring and Management](#monitoring-and-management)
+6. [GPU-Hour Quotas](#gpu-hour-quotas)
+7. [Advanced Usage](#advanced-usage)
+8. [Best Practices](#best-practices)
+9. [Common Workflows](#common-workflows)
+10. [Troubleshooting](#troubleshooting)
 
 ## Overview
 
 ### What is the GPU Queue System?
 
-Our custom GPU queue system (`gpuq`) manages fair access to the server's 3 H200 GPUs, ensuring:
+Our custom GPU queue system (`gpuq`) coordinates fair access to the server's 4 H200 NVL GPUs among everyone in the `gpuqueue` group, ensuring:
 
-- **Fair resource allocation** - First-come, first-served job scheduling
-- **Resource limits** - Prevents users from monopolizing GPUs
-- **Automatic cleanup** - Jobs are terminated after time limits
-- **Usage monitoring** - Track who's using what resources
-- **Notifications** - Email/Slack alerts for job completion and issues
+- **Cooperative allocation** - Each `gpuq submit` claims free GPU(s) and runs your job; jobs queue and wait when nothing is free
+- **Ownership policy** - You may stack more jobs on GPUs you already hold; GPUs held by *other* users are off-limits until they free up
+- **Self-supervising time limits** - Each job's own `gpuq submit` process kills it when the time limit is reached
+- **Usage monitoring** - `gpuq status` shows who is using what, and `gpuq audit` (run on cron) reports resource hogs and policy breaches
+- **Per-user quotas** - Rolling 7-day GPU-hour budgets keep one user from monopolizing the box over time
+- **Opt-in notifications** - Email alerts for job completion and policy issues
+
+> **gpuq is daemonless.** There is no background service. Each `gpuq submit` runs
+> your command **in the foreground** in your terminal; that same process supervises
+> the job and enforces its time limit. Server-side policy checks (resource hogs,
+> over-quota users, untracked/rebound GPU jobs) run periodically via `gpuq audit`
+> on cron — typically every 15 minutes — not from a live monitor.
 
 ### Key Features
 
-- **80GB memory per H200 GPU** - Massive memory for large models
-- **Time-limited jobs** - Default 24-hour maximum runtime
-- **Queue management** - Jobs wait for available resources
-- **Resource monitoring** - Real-time GPU usage tracking
-- **Flexible submission** - Support for various workload types
+- **~140 GiB memory per H200 NVL GPU** - Each card reports 143771 MiB (~141 GB); about ~564 GB total across the 4 GPUs. Massive memory for large models.
+- **Default 24-hour time limit** - The default `--time` is 24h; you can request more or less (it is a default, not a hard ceiling)
+- **Queue management** - With `--queue`, jobs wait for resources instead of being rejected
+- **Resource monitoring** - Real-time `gpuq status` plus periodic `gpuq audit` policy checks
+- **Flexible submission** - Pass the command after `--`, or as a single `--command "..."` string
 
 ## Basic Usage
 
@@ -41,18 +50,24 @@ Our custom GPU queue system (`gpuq`) manages fair access to the server's 3 H200 
 # Check current GPU status and queue
 gpuq status
 
-# Submit a simple training job
-gpuq submit --command "python train.py"
+# Submit a simple training job on one random free GPU
+gpuq submit -- python train.py
 
-# Submit with specific requirements
-gpuq submit --command "python large_model.py" --gpus 2 --memory 40 --time 12
+# Submit with specific requirements (2 GPUs, need >=40 GB free each, 12h limit)
+gpuq submit -g 2 -m 40 -t 12 -- python large_model.py
 
 # Check your jobs
-gpuq status | grep $USER
+gpuq status | grep "$USER"
 
-# Kill a specific job
-gpuq kill --job-id 12345
+# Kill one of your jobs (positional job id)
+gpuq kill 12345
 ```
+
+> **Pass your command after `--`.** `gpuq` runs the command **directly, with no
+> shell**, so shell features (`&&`, `||`, `cd`, `>`, `2>&1`, trailing `&`,
+> `VAR=value` prefixes) are **not** interpreted — they would be handed to your
+> program as literal arguments. If you need any of those, wrap the whole pipeline
+> in an explicit shell: `gpuq submit -- bash -lc "cd /path && python train.py"`.
 
 ### First Time Setup
 
@@ -64,7 +79,7 @@ nvidia-smi
 
 2. **Test job submission**:
 ```bash
-gpuq submit --command "python -c 'print(\"Hello GPU!\")'" --time 1
+gpuq submit -t 1 -- python -c 'print("Hello GPU!")'
 ```
 
 3. **Monitor job progress**:
@@ -74,20 +89,34 @@ watch -n 5 gpuq status
 
 ## Job Submission
 
+`gpuq submit` accepts the command in two equivalent ways:
+
+```bash
+# Preferred: everything after `--` is the command and its arguments (no shell)
+gpuq submit -- python train.py --epochs 100
+
+# Or as one string (parsed with shell-style quoting, but still run without a shell)
+gpuq submit --command "python train.py --epochs 100"
+```
+
 ### Basic Job Submission
 
 ```bash
-# Minimal submission (uses defaults)
-gpuq submit --command "python train.py"
+# Minimal submission (uses defaults: 1 GPU, default memory/time)
+gpuq submit -- python train.py
 
-# Specify all parameters
+# Specify the common parameters
 gpuq submit \
-  --command "python train.py --epochs 100 --batch-size 32" \
-  --gpus 1 \
-  --memory 40 \
-  --time 8 \
-  --email "your-email@example.com"
+  -g 1 \
+  -m 40 \
+  -t 8 \
+  --notify "your-email@example.com" \
+  -- python train.py --epochs 100 --batch-size 32
 ```
+
+> `--notify` is **optional**. If you omit it, the completion email goes to the
+> address on your account (read from your GECOS field). Use `--notify` only to
+> send it somewhere else. There is **no** `--email` flag.
 
 ### Resource Specification
 
@@ -95,40 +124,59 @@ gpuq submit \
 
 ```bash
 # Single GPU (default)
-gpuq submit --command "python train.py" --gpus 1
+gpuq submit -g 1 -- python train.py
 
-# Multi-GPU training
-gpuq submit --command "python -m torch.distributed.launch train.py" --gpus 2
+# Multi-GPU training (2 GPUs)
+gpuq submit -g 2 -- torchrun --nproc_per_node=2 train.py
 
-# All available GPUs
-gpuq submit --command "python multi_gpu_train.py" --gpus 3
+# All four GPUs (only succeeds if all are free or already yours)
+gpuq submit -g 4 -- torchrun --nproc_per_node=4 multi_gpu_train.py
 ```
 
-#### Memory Requirements
+`-g/--gpus N` asks for `N` GPUs; `gpuq` picks them at random among the GPUs
+selectable for you (see [Choosing Which GPU](#choosing-which-gpu)). To pin exact
+indices, use `--devices` instead.
+
+#### Memory Requirements (a selection filter, not a reservation)
+
+`-m/--memory GB` is the **minimum free VRAM a candidate GPU must have to be
+chosen** — it is an admission *filter*, not a cap or a reservation. Your job is
+**not** held to that number; it can use as much VRAM as is physically on the card.
+The default comes from the config (`max_memory_per_gpu_gb`, currently 70).
 
 ```bash
-# Specify memory per GPU (in GB)
-gpuq submit --command "python big_model.py" --memory 60
+# Only pick a GPU that currently has >= 60 GB free
+gpuq submit -m 60 -- python big_model.py
 
-# For memory-intensive models
-gpuq submit --command "python huge_model.py" --memory 75
+# Memory-hungry job: require a near-empty card (>= 120 GB free)
+gpuq submit -m 120 -- python huge_model.py
 
-# Conservative memory usage
-gpuq submit --command "python small_model.py" --memory 20
+# Modest filter for a small model
+gpuq submit -m 20 -- python small_model.py
 ```
 
 #### Time Limits
 
+`-t/--time HOURS` sets how long the job may run before `gpuq` kills it. The
+default is 24h (from the config); it is a **default, not a hard maximum** — you
+may request more.
+
 ```bash
-# Short experiments (1 hour)
-gpuq submit --command "python quick_test.py" --time 1
+# Short experiment (1 hour)
+gpuq submit -t 1 -- python quick_test.py
 
 # Medium training (8 hours)
-gpuq submit --command "python train.py" --time 8
+gpuq submit -t 8 -- python train.py
 
-# Long training (24 hours - maximum)
-gpuq submit --command "python long_train.py" --time 24
+# Long training (48 hours)
+gpuq submit -t 48 -- python long_train.py
 ```
+
+> Because `gpuq` is daemonless, the time limit is enforced by the **foreground
+> `gpuq submit` process itself** (a timer inside it). If that process is killed
+> (e.g. your SSH session drops), the timer dies with it. Run long jobs under
+> `tmux`/`screen`, or with [user-linger](#keeping-jobs-alive-after-logout)
+> enabled, so the supervising process stays alive.
 
 ### Command Examples
 
@@ -136,55 +184,92 @@ gpuq submit --command "python long_train.py" --time 24
 
 ```bash
 # PyTorch training
-gpuq submit --command "python train.py --model resnet50 --epochs 100" --gpus 1 --memory 30 --time 12
+gpuq submit -g 1 -m 30 -t 12 -- python train.py --model resnet50 --epochs 100
 
 # TensorFlow training
-gpuq submit --command "python tf_train.py --model_dir ./models" --gpus 1 --memory 25 --time 8
+gpuq submit -g 1 -m 25 -t 8 -- python tf_train.py --model_dir ./models
 
-# Distributed training
-gpuq submit --command "torchrun --nproc_per_node=2 distributed_train.py" --gpus 2 --memory 40 --time 16
+# Distributed training (2 GPUs)
+gpuq submit -g 2 -m 40 -t 16 -- torchrun --nproc_per_node=2 distributed_train.py
 ```
 
 #### Jupyter Notebooks
 
 ```bash
-# Start Jupyter on port 8888
-gpuq submit --command "jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser" --gpus 1 --time 8
+# Start Jupyter on port 8888 (holds your terminal — see note below)
+gpuq submit -g 1 -t 8 -- jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser
 
 # JupyterLab with custom port
-gpuq submit --command "jupyter lab --ip=0.0.0.0 --port=9999 --no-browser" --gpus 1 --memory 30 --time 4
+gpuq submit -g 1 -m 30 -t 4 -- jupyter lab --ip=0.0.0.0 --port=9999 --no-browser
 
-# Jupyter with specific working directory
-gpuq submit --command "cd /path/to/project && jupyter notebook --ip=0.0.0.0 --port=8888" --gpus 1 --time 6
+# Jupyter with a specific working directory (needs a shell for `cd`)
+gpuq submit -g 1 -t 6 -- bash -lc "cd /path/to/project && jupyter notebook --ip=0.0.0.0 --port=8888"
 ```
 
 #### Data Processing
 
 ```bash
 # Large dataset preprocessing
-gpuq submit --command "python preprocess_data.py --dataset imagenet" --gpus 1 --memory 50 --time 4
+gpuq submit -g 1 -m 50 -t 4 -- python preprocess_data.py --dataset imagenet
 
 # Feature extraction
-gpuq submit --command "python extract_features.py --model vit_large" --gpus 1 --memory 35 --time 3
+gpuq submit -g 1 -m 35 -t 3 -- python extract_features.py --model vit_large
 ```
+
+## Choosing Which GPU
+
+`gpuq` hands out two kinds of GPU:
+
+- **Free** cards — held by no `gpuq` job, with enough free VRAM (your `-m` filter)
+  and under 10% utilization.
+- Cards **you already own** — held by one of your own running jobs. You may
+  **stack** more jobs onto your own cards. An owned card skips the utilization
+  check (your own job legitimately drives it up) but still needs a little free
+  VRAM (~2 GB) so you don't stack straight into an out-of-memory error.
+
+A GPU held by **another** user is **never** handed to you until it frees up.
+
+- **Default picker:** `gpuq submit -g N` picks `N` GPUs, preferring **free** cards
+  (chosen at random, to spread load across the box) and only stacking onto cards
+  you already own when there aren't enough free ones.
+- **Pin specific GPUs:** `gpuq submit --devices 1,3 -- …` runs on exactly those
+  indices (the GPU count is taken from the list). Each must be free or already
+  yours. If any is held by **another user**, the submit is **rejected
+  immediately** with a per-GPU reason — *unless* you add `--queue`, in which case
+  it **waits** until all the pinned GPUs become available.
+
+```bash
+gpuq submit -g 2 -- python train.py              # 2 free GPUs (spread), else stack on yours
+gpuq submit --devices 0,2 -- python x.py         # exactly GPU 0 and 2 (else rejected now)
+gpuq submit --devices 0 -- python b.py           # stack another job onto your own GPU 0
+gpuq submit --devices 1,3 --queue -- python y.py # wait for exactly GPU 1 and 3
+```
+
+> **`gpuq` sets `CUDA_VISIBLE_DEVICES` for you** to the GPU(s) it allocated. Do
+> **not** override it (and do not pass a hard-coded `--gpu N` / `device=N` to your
+> script), or your job will run on a card it wasn't allocated — leaving the
+> allocated card reserved-but-idle. The `gpuq audit` **rebind detector** flags
+> this (warn → remind → overdue → kill, with kill only under `--enforce`). If you
+> want a specific card, pin it with `--devices`.
 
 ## Monitoring and Management
 
 ### Checking Job Status
 
 ```bash
-# Overall system status
+# Full status: each GPU's state, running jobs, queued jobs, and every live
+# GPU compute process from nvidia-smi
 gpuq status
-
-# Detailed status with job information
-gpuq status --detailed
 
 # Monitor in real-time
 watch -n 5 gpuq status
 
 # Check only your jobs
-gpuq status | grep $USER
+gpuq status | grep "$USER"
 ```
+
+> Plain `gpuq status` already shows everything — GPUs, running jobs, queued jobs,
+> and all live `nvidia-smi` compute processes. There is **no** `--detailed` flag.
 
 ### GPU Monitoring
 
@@ -195,89 +280,159 @@ nvidia-smi -l 1
 # GPU utilization and memory
 nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv
 
-# Continuous monitoring with better formatting
+# Continuous monitoring with compact formatting
 watch -n 2 'nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits'
 ```
 
-### Job Logs
+### Job Output (no per-job log files)
+
+`gpuq` runs your job in the foreground and **inherits your terminal's
+stdin/stdout/stderr** — it does **not** write per-job log files anywhere. To keep
+the output, redirect it yourself, or run inside `tmux`/`screen`:
 
 ```bash
-# View job output logs
-tail -f /tmp/gpu_queue/logs/job_12345_stdout.log
+# Tee output to a file while still seeing it
+gpuq submit -- bash -lc 'python train.py' 2>&1 | tee run.log
 
-# View error logs
-tail -f /tmp/gpu_queue/logs/job_12345_stderr.log
+# Or just redirect with your shell
+gpuq submit -- python train.py > train.out 2> train.err
 
-# Search for specific patterns in logs
-grep -i "error\|warning" /tmp/gpu_queue/logs/job_12345_stderr.log
+# Detached, survives logout
+tmux new -s train 'gpuq submit -- python train.py 2>&1 | tee run.log'
 ```
 
 ### Managing Jobs
 
 ```bash
-# Kill a specific job
+# Kill one of YOUR running jobs (positional job id; preferred form)
+gpuq kill 12345
+
+# The same, as a flag
 gpuq kill --job-id 12345
 
-# Kill all your jobs (be careful!)
-gpuq status | grep $USER | awk '{print $1}' | xargs -I {} gpuq kill --job-id {}
+# Kill all of YOUR running jobs (parse the "Job <id> by <user>" lines)
+gpuq status | awk -v me="$USER" '/^  Job/ && $4==me {print $2}' | xargs -r -n1 gpuq kill
 
-# Check if job completed successfully
-echo $?  # after job completion, 0 = success
+# Check exit status of a foreground job after it finishes
+echo $?   # 0 = success
 ```
+
+> You can only kill your **own** jobs; `gpuq kill` refuses someone else's. The
+> running-job lines are formatted `  Job <id> by <user> ...`, so the job id is the
+> **second** field — `awk '{print $1}'` would print the literal word `Job`, not an
+> id.
+
+## GPU-Hour Quotas
+
+`gpuq` enforces a **rolling 7-day GPU-hour budget** per user (set by the admin in
+the config). A budget of `0` or missing means **unlimited** (the default).
+Charging is by **actual runtime × GPUs held**, recorded when each job ends.
+
+When a `gpuq submit` would push you over budget, the job is **not rejected** —
+instead it is **deprioritized**:
+
+1. Marked low-priority and forced into the queue (a warning is printed).
+2. You are emailed once (if notifications are enabled and your account has an
+   email).
+3. Polled at a longer interval and made to yield to any normal-priority submitter
+   waiting on the same host.
+
+A solo over-quota submit still runs eventually (after its first poll delay); a
+contended one waits until the normal-priority queue clears. Check the admin's
+quota policy with `gpuq config --show`.
 
 ## Advanced Usage
 
 ### Environment Variables
 
+`gpuq` runs your command with **no shell**, so you cannot prefix it with
+`VAR=value` (that token would be taken as the program name). Two correct
+approaches:
+
 ```bash
-# Set CUDA devices within job
-gpuq submit --command "CUDA_VISIBLE_DEVICES=0 python train.py"
+# 1) Export in your own shell BEFORE submitting — gpuq inherits your environment
+export PYTHONPATH=/path/to/modules
+gpuq submit -- python train.py
 
-# Use specific conda environment
-gpuq submit --command "conda activate myenv && python train.py"
+# 2) Or wrap the command in an explicit shell
+gpuq submit -- bash -lc "export PYTHONPATH=/path/to/modules && python train.py"
+```
 
-# Set multiple environment variables
-gpuq submit --command "export PYTHONPATH=/path/to/modules && python train.py"
+> Do **not** set `CUDA_VISIBLE_DEVICES` yourself — `gpuq` sets it to the GPU(s) it
+> allocated, and overriding it triggers the rebind detector (see
+> [Choosing Which GPU](#choosing-which-gpu)).
+
+### Virtual Environments
+
+Activate your conda/venv environment **in your shell first**, then submit; `gpuq`
+inherits the active environment:
+
+```bash
+conda activate myenv
+gpuq submit -- python train.py
+```
+
+Or wrap activation in a shell so it travels with the job:
+
+```bash
+gpuq submit -- bash -lc "conda activate myenv && python train.py"
 ```
 
 ### Complex Commands
 
+Because there is no shell, `&&`, `||`, `cd`, redirects (`>`), and background `&`
+are not interpreted. Wrap any pipeline in `bash -lc`:
+
 ```bash
 # Chain multiple commands
-gpuq submit --command "cd /path/to/project && python preprocess.py && python train.py"
+gpuq submit -- bash -lc "cd /path/to/project && python preprocess.py && python train.py"
 
 # Conditional execution
-gpuq submit --command "python train.py && python evaluate.py || echo 'Training failed'"
+gpuq submit -- bash -lc "python train.py && python evaluate.py || echo 'Training failed'"
 
-# Background processes within job
-gpuq submit --command "python train.py > output.log 2>&1 &"
+# Redirect output inside the job
+gpuq submit -- bash -lc "python train.py > output.log 2>&1"
 ```
 
 ### Resource Optimization
 
 ```bash
 # Memory-efficient training with gradient checkpointing
-gpuq submit --command "python train.py --gradient-checkpointing --batch-size 16" --memory 35
+gpuq submit -m 35 -- python train.py --gradient-checkpointing --batch-size 16
 
-# Mixed precision training
-gpuq submit --command "python train.py --fp16 --batch-size 64" --memory 25
+# Mixed-precision training
+gpuq submit -m 25 -- python train.py --amp --batch-size 64
 
-# Model parallelism
-gpuq submit --command "python train.py --model-parallel" --gpus 2 --memory 60
+# Model parallelism across 2 GPUs
+gpuq submit -g 2 -m 60 -- python train.py --model-parallel
 ```
 
 ### Interactive Jobs
 
+Interactive sessions work because `gpuq` passes through stdin, but the session is
+**tied to your terminal** — there is no detach, and if the job has to queue first,
+the submit blocks while it polls. Run interactive jobs inside `tmux`/`screen`.
+
 ```bash
 # Interactive Python session
-gpuq submit --command "python -i" --gpus 1 --time 2
+gpuq submit -g 1 -t 2 -- python -i
 
 # Interactive shell with GPU access
-gpuq submit --command "bash" --gpus 1 --time 1
+gpuq submit -g 1 -t 1 -- bash
 
-# Remote development session
-gpuq submit --command "code-server --bind-addr 0.0.0.0:8080" --gpus 1 --time 8
+# Remote development session (code-server)
+gpuq submit -g 1 -t 8 -- code-server --bind-addr 0.0.0.0:8080
 ```
+
+### Keeping Jobs Alive After Logout
+
+The supervising `gpuq submit` process must stay alive for the job's time limit to
+be enforced and for output to be captured. Options:
+
+- Run inside **`tmux`** or **`screen`** and detach.
+- Ask the admin to **enable user-linger** (`sudo loginctl enable-linger <you>`),
+  which keeps your processes — and `gpuq`'s per-job systemd `--user` scope — alive
+  after you log out, and gives `gpuq audit` the most robust subprocess tracking.
 
 ## Best Practices
 
@@ -285,21 +440,23 @@ gpuq submit --command "code-server --bind-addr 0.0.0.0:8080" --gpus 1 --time 8
 
 1. **Request only what you need**:
    ```bash
-   # Good: Specific requirements
-   gpuq submit --command "python train.py" --gpus 1 --memory 30 --time 8
-   
-   # Bad: Excessive resources
-   gpuq submit --command "python train.py" --gpus 3 --memory 75 --time 24
+   # Good: specific, modest requirements
+   gpuq submit -g 1 -m 30 -t 8 -- python train.py
+
+   # Avoid: grabbing all four GPUs and a giant time window for a small job
+   gpuq submit -g 4 -m 120 -t 48 -- python train.py
    ```
 
 2. **Use appropriate time limits**:
    - Quick tests: 1-2 hours
    - Medium experiments: 4-8 hours
-   - Long training: 12-24 hours
+   - Long training: 12-48 hours
 
-3. **Monitor resource usage**:
+3. **Mind your quota**: GPU-hours are charged as runtime × GPUs; check
+   `gpuq config --show` and avoid holding GPUs idle.
+
+4. **Monitor resource usage**:
    ```bash
-   # Check if you're using allocated resources efficiently
    nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 10
    ```
 
@@ -307,28 +464,28 @@ gpuq submit --command "code-server --bind-addr 0.0.0.0:8080" --gpus 1 --time 8
 
 1. **Test locally first**:
    ```bash
-   # Test with small dataset/short training first
+   # Quick check with a small dataset / short training before a full run
    python train.py --epochs 1 --batch-size 8
    ```
 
-2. **Use absolute paths**:
+2. **Use absolute paths** (and a shell when you need `cd`):
    ```bash
    # Good
-   gpuq submit --command "cd /home/user/project && python train.py"
-   
-   # Bad (relative paths may not work)
-   gpuq submit --command "python ../train.py"
+   gpuq submit -- bash -lc "cd /home/user/project && python train.py"
+
+   # Fragile: relative paths resolve against gpuq's working directory
+   gpuq submit -- python ../train.py
    ```
 
 3. **Specify output directories**:
    ```bash
-   gpuq submit --command "python train.py --output-dir /home/user/results/exp1"
+   gpuq submit -- python train.py --output-dir /home/user/results/exp1
    ```
 
 ### Code Organization
 
 1. **Use configuration files**:
-   ```python
+   ```yaml
    # config.yaml
    model:
      name: "resnet50"
@@ -364,31 +521,31 @@ gpuq submit --command "code-server --bind-addr 0.0.0.0:8080" --gpus 1 --time 8
 cd /home/user/myproject
 ls -la  # check files are ready
 
-# 2. Test locally with small dataset
+# 2. Test locally with a small dataset
 python train.py --epochs 1 --batch-size 4 --debug
 
-# 3. Submit full training job
-gpuq submit \
-  --command "python train.py --epochs 100 --batch-size 32 --save-dir ./models" \
-  --gpus 1 \
-  --memory 40 \
-  --time 12 \
-  --email "user@example.com"
+# 3. Submit the full training job under tmux, teeing the output to a file
+tmux new -s train \
+  'gpuq submit -g 1 -m 40 -t 12 --notify "user@example.com" \
+     -- python train.py --epochs 100 --batch-size 32 --save-dir ./models \
+   2>&1 | tee train.log'
 
-# 4. Monitor progress
+# 4. Monitor progress (from another shell)
 watch -n 10 gpuq status
-tail -f /tmp/gpu_queue/logs/job_XXXXX_stdout.log
+tail -f /home/user/myproject/train.log
 ```
 
 ### Hyperparameter Tuning
 
 ```bash
-# Submit multiple jobs with different hyperparameters
+# Submit multiple jobs with different hyperparameters.
+# Each gpuq submit is foreground, so run them with --queue in the background,
+# or launch each in its own tmux window.
 for lr in 0.001 0.01 0.1; do
   for bs in 16 32 64; do
-    gpuq submit \
-      --command "python train.py --lr $lr --batch-size $bs --name lr${lr}_bs${bs}" \
-      --gpus 1 --memory 30 --time 8
+    tmux new -d -s "lr${lr}_bs${bs}" \
+      "gpuq submit -g 1 -m 30 -t 8 --queue --name lr${lr}_bs${bs} \
+         -- python train.py --lr $lr --batch-size $bs"
   done
 done
 ```
@@ -396,23 +553,18 @@ done
 ### Model Inference
 
 ```bash
-# Batch inference on large dataset
-gpuq submit \
-  --command "python inference.py --model-path ./best_model.pth --data-dir ./test_data" \
-  --gpus 1 \
-  --memory 25 \
-  --time 4
+# Batch inference on a large dataset
+gpuq submit -g 1 -m 25 -t 4 \
+  -- python inference.py --model-path ./best_model.pth --data-dir ./test_data
 ```
 
 ### Interactive Development
 
 ```bash
-# Start Jupyter for development
-gpuq submit \
-  --command "jupyter lab --ip=0.0.0.0 --port=8888 --no-browser" \
-  --gpus 1 \
-  --memory 30 \
-  --time 8
+# Start Jupyter for development (run it under tmux so it survives logout)
+tmux new -s jlab \
+  'gpuq submit -g 1 -m 30 -t 8 \
+     -- jupyter lab --ip=0.0.0.0 --port=8888 --no-browser'
 
 # Connect via SSH tunnel (from your local machine)
 ssh -L 8888:localhost:8888 user@server.com
@@ -424,31 +576,37 @@ ssh -L 8888:localhost:8888 user@server.com
 
 ### Common Issues
 
-#### Job Won't Start
+#### Job Won't Start / Is Rejected
 
 ```bash
 # Check queue status
 gpuq status
 
 # Common causes:
-# 1. All GPUs busy - wait or reduce resource requirements
-# 2. Requesting more memory than available (max ~75GB per H200)
-# 3. Syntax error in command
+# 1. No selectable GPU right now — all are busy or held by other users.
+#    Add --queue to wait instead of being rejected.
+# 2. Your -m/--memory filter is higher than any card's current free VRAM.
+#    Lower it, or wait for a card to free up.
+# 3. --devices pinned a GPU held by someone else (rejected immediately
+#    unless you also pass --queue).
+# 4. You are over your GPU-hour quota — the job is deprioritized, not rejected.
 
-# Debugging
-gpuq submit --command "echo 'Test job'" --gpus 1 --time 1
+# Debugging smoke test
+gpuq submit -g 1 -t 1 -- echo "Test job"
 ```
 
 #### Job Killed Unexpectedly
 
 ```bash
-# Check job logs for errors
-tail -100 /tmp/gpu_queue/logs/job_XXXXX_stderr.log
+# gpuq has no per-job log files — check the output you redirected yourself
+tail -100 train.err
 
 # Common causes:
-# 1. Out of memory - reduce batch size or model size
-# 2. Time limit exceeded - increase time limit
-# 3. Code error - check stderr logs
+# 1. Out of memory — reduce batch size or model size
+# 2. Time limit reached — gpuq killed it at --time; request more time
+# 3. The supervising `gpuq submit` process died (SSH dropped, no tmux/linger),
+#    so the job was orphaned; later `gpuq audit` may clean it up
+# 4. Code error — inspect your redirected stderr
 ```
 
 #### GPU Out of Memory
@@ -461,25 +619,24 @@ nvidia-smi
 # 1. Reduce batch size
 # 2. Use gradient accumulation
 # 3. Enable gradient checkpointing
-# 4. Use mixed precision (fp16)
+# 4. Use mixed precision (AMP / bf16)
 
 # Example with memory optimization
-gpuq submit \
-  --command "python train.py --batch-size 16 --gradient-checkpointing --fp16" \
-  --gpus 1 --memory 30
+gpuq submit -g 1 -m 30 \
+  -- python train.py --batch-size 16 --gradient-checkpointing --amp
 ```
 
-#### Can't Access Job Output
+#### Can't See Job Output
 
 ```bash
-# Check if job is still running
-gpuq status | grep job_id
+# Check if the job is still running
+gpuq status | grep "$USER"
 
-# Find log files
-ls -la /tmp/gpu_queue/logs/job_*
+# gpuq does NOT create log files — its output went to your terminal.
+# If you redirected it, read that file:
+tail -f train.log
 
-# Check permissions
-ls -la /tmp/gpu_queue/logs/job_XXXXX_*.log
+# Next time, capture it: `... | tee run.log`, or run under tmux/screen.
 ```
 
 ### Performance Issues
@@ -496,9 +653,7 @@ nvidia-smi -l 1
 # 3. Profile your code
 
 # Example with optimized data loading
-gpuq submit \
-  --command "python train.py --num-workers 8 --batch-size 64" \
-  --gpus 1
+gpuq submit -g 1 -- python train.py --num-workers 8 --batch-size 64
 ```
 
 #### Memory Leaks
@@ -515,12 +670,13 @@ python -m memory_profiler train.py
 ### Getting Help
 
 1. **Check system status**: `gpuq status`
-2. **Review logs**: `/tmp/gpu_queue/logs/`
-3. **Test with simple commands**: `gpuq submit --command "nvidia-smi"`
-4. **Contact administrator** with:
+2. **Inspect your own redirected output** (there are no per-job log files)
+3. **Test with simple commands**: `gpuq submit -- nvidia-smi`
+4. **See active settings**: `gpuq config --show`
+5. **Contact the administrator** with:
    - Job ID
    - Command used
-   - Error logs
+   - Error output you captured
    - Expected vs actual behavior
 
 ---

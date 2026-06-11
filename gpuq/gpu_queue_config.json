@@ -1,16 +1,36 @@
 {
-"max_job_time_hours": 24,
-"max_memory_per_gpu_gb": 70,
-"notification_email": {
+  "max_job_time_hours": 24,
+  "max_memory_per_gpu_gb": 70,
+  "notification_email": {
     "enabled": false,
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
     "username": "",
     "password": "",
     "admin_email": "admin@yourlab.com"
-},
-"slack": {"enabled": false, "webhook_url": "", "channel": "#gpu-alerts"},
-"user_emails": {
-    "user1": "user1@yourlab.com"
-}
+  },
+  "slack": {
+    "enabled": false,
+    "webhook_url": "",
+    "channel": "#gpu-alerts"
+  },
+  "quotas": {
+    "default_gpu_hours_per_week": 0,
+    "users": {}
+  },
+  "audit": {
+    "max_gpus_per_user": 2,
+    "max_total_memory_gb": 50,
+    "notify_untracked": false,
+    "untracked_min_memory_mb": 512,
+    "untracked_grace_seconds": 120,
+    "untracked_grace_hours": 24,
+    "untracked_reminder_hours": 6,
+    "untracked_allowlist": [],
+    "notify_rebind": false,
+    "rebind_min_memory_mb": 512,
+    "rebind_grace_seconds": 120,
+    "rebind_grace_hours": 24,
+    "rebind_reminder_hours": 6
+  }
 }

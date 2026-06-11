@@ -101,7 +101,9 @@ validate_directory() {
 # Function to check filesystem atime support
 check_atime_support() {
     local dir="$1"
-    local test_file="$dir/.atime_test_$"
+    # Use $$ (the PID) so concurrent runs get unique test files; a lone "$"
+    # is a literal dollar sign in a double-quoted string, not the PID.
+    local test_file="$dir/.atime_test_$$"
     
     # Create test file
     if ! touch "$test_file" 2>/dev/null; then
@@ -194,7 +196,10 @@ clean_directory() {
             local username
             if command -v stat >/dev/null 2>&1; then
                 access_time=$(stat -c %x "$file" 2>/dev/null || stat -f %Sa "$file" 2>/dev/null || echo "unknown")
-                username=$(stat -c %U "$file" 2>/dev/null || echo "iacopo")
+                # Leave the owner empty if it cannot be resolved; the
+                # notification below then falls back to the admin address
+                # instead of mis-attributing the file to a specific user.
+                username=$(stat -c %U "$file" 2>/dev/null || echo "")
             else
                 access_time="unknown"
             fi
@@ -207,11 +212,17 @@ clean_directory() {
 
                 # Form the user's email address
                 ADMIN_EMAIL=mjolnirruqola@gmail.com
-                USER_EMAIL=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $5}') 
+                USER_EMAIL=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $5}')
 
                 USER_FULL_NAME=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $1}')
 
-                
+                # Fall back to the admin if the owner / their email is unknown,
+                # so notifications about orphaned files are not misdirected.
+                if [[ -z "$USER_EMAIL" ]]; then
+                    USER_EMAIL="$ADMIN_EMAIL"
+                fi
+
+
 
                 DELETION_MAIL=$(cat <<EOF
 To: ${USER_EMAIL}
@@ -231,7 +242,7 @@ System Administrator
 EOF
 )
 
-            # Send the email using ssmtp
+            # Send the email using msmtp
             echo "$DELETION_MAIL" | /usr/bin/msmtp "$USER_EMAIL"
             echo "Sent deletion email to $USER_EMAIL"
 
@@ -240,7 +251,11 @@ EOF
                 ((errors++))
             fi
         fi
-    done < <(find "$scratch_dir" -type f \( -atime +$DAYS_TO_KEEP -o -mtime +$DAYS_TO_KEEP \) -print0 2>/dev/null)
+    # /scratch is mounted `noatime`, so atime is frozen at creation and never
+    # updates on read. The old `-atime +N -o -mtime +N` (OR) therefore deleted
+    # any file *created* over N days ago even if it was modified today. Key the
+    # cleanup off modification time only — the sole reliable staleness signal here.
+    done < <(find "$scratch_dir" -type f -mtime +$DAYS_TO_KEEP -print0 2>/dev/null)
     
     # Clean up empty directories (but preserve important structure)
     log_message "INFO" "Removing empty directories in $scratch_dir (preserving structure)"
@@ -302,16 +317,19 @@ notify_imminent_deletion(){
             local username
             if command -v stat >/dev/null 2>&1; then
                 access_time=$(stat -c %x "$file" 2>/dev/null || stat -f %Sa "$file" 2>/dev/null || echo "unknown")
-                username=$(stat -c %U "$file" 2>/dev/null || echo "iacopo")
-                # Get the last access time in seconds since the epoch
-                # Use '%Y' for modification time if you prefer
-                last_access_seconds=$(stat -c %X "$file")
+                # Leave the owner empty if it cannot be resolved; the
+                # notification below then falls back to the admin address
+                # instead of mis-attributing the file to a specific user.
+                username=$(stat -c %U "$file" 2>/dev/null || echo "")
+                # Last *modification* time in seconds since the epoch. (atime is
+                # unreliable here: /scratch is mounted noatime, so %X never moves.)
+                last_modify_seconds=$(stat -c %Y "$file")
 
                 # Get the current time in seconds
                 current_seconds=$(date +%s)
 
                 # Calculate the elapsed time in seconds
-                elapsed_seconds=$((current_seconds - last_access_seconds))
+                elapsed_seconds=$((current_seconds - last_modify_seconds))
 
                 # Calculate the elapsed time in days
                 elapsed_days=$((elapsed_seconds / 86400))
@@ -327,9 +345,15 @@ notify_imminent_deletion(){
 
             # Form the user's email address
             ADMIN_EMAIL=mjolnirruqola@gmail.com
-            USER_EMAIL=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $5}') 
+            USER_EMAIL=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $5}')
 
             USER_FULL_NAME=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $1}')
+
+            # Fall back to the admin if the owner / their email is unknown,
+            # so notifications about orphaned files are not misdirected.
+            if [[ -z "$USER_EMAIL" ]]; then
+                USER_EMAIL="$ADMIN_EMAIL"
+            fi
 
             NOTIFICATION_MAIL=$(cat <<EOF
 To: ${USER_EMAIL}
@@ -342,18 +366,22 @@ This is an automated notification from the server.
 The file ${file} has passed the notification period of 23 days without being accessed or modified.
 After 30 days without being accessed or modified files in "/scratch/" sub-directories except the ones in "/scratch/datasets" will be automatically deleted.
 
-If the file is not to be deleted, please ensure that you access, modify or copy the file to a permanent directory within ${days_remaining} days.
+If the file is not to be deleted, please modify it (re-save it, or run `touch` on it) or copy it to a permanent directory within ${days_remaining} days. Note: simply opening or reading the file does NOT reset the timer.
 
 Thank you,
 System Administrator
 EOF
 )
 
-            # Send the email using ssmtp
+            # Send the email using msmtp
             echo "$NOTIFICATION_MAIL" | /usr/bin/msmtp "$USER_EMAIL"
             echo "Sent notification email to $USER_EMAIL"
         fi
-    done < <(find "$scratch_dir" -type f \( -atime +$DAYS_TO_NOTIFY -o -mtime +$DAYS_TO_NOTIFY \) -print0 2>/dev/null)
+    # Only notify for files in the warning window (>= DAYS_TO_NOTIFY but not yet
+    # eligible for deletion). Excluding files already past DAYS_TO_KEEP stops
+    # users getting a contradictory "imminent removal" email in the same run
+    # that also deletes the file.
+    done < <(find "$scratch_dir" -type f -mtime +$DAYS_TO_NOTIFY ! -mtime +$DAYS_TO_KEEP -print0 2>/dev/null)
 }
 
 # Function to format bytes

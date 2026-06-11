@@ -46,7 +46,7 @@ System Administrator
 EOF
 )
 
-    # Send the email using ssmtp
+    # Send the email using msmtp
     echo "$MAIL" | /usr/bin/msmtp "$USER_EMAIL"
     echo "Sent quota warning to $USER_EMAIL"
 done

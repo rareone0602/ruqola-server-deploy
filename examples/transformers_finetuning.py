@@ -183,7 +183,7 @@ class H200OptimizedModelLoader:
                 'config': {
                     'torch_dtype': torch.float16,
                     'device_map': 'auto',
-                    'max_memory': {i: "75GB" for i in range(self.device_count)},
+                    'max_memory': {i: "130GB" for i in range(self.device_count)},
                     'offload_folder': './offload',
                     'low_cpu_mem_usage': True,
                 }
@@ -419,7 +419,7 @@ class H200TrainingOptimizer:
             # Logging and saving
             logging_dir=f"{self.config['training']['output_dir']}/logs",
             logging_steps=self.config['training']['logging_steps'],
-            evaluation_strategy=self.config['training']['evaluation_strategy'],
+            eval_strategy=self.config['training']['eval_strategy'],
             eval_steps=self.config['training']['eval_steps'],
             save_strategy=self.config['training']['save_strategy'],
             save_steps=self.config['training']['save_steps'],

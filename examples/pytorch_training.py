@@ -17,7 +17,7 @@ Features:
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -211,7 +211,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, criterion, scaler, ep
         optimizer.zero_grad()
         
         # Mixed precision forward pass
-        with autocast(enabled=config['training']['mixed_precision']):
+        with autocast('cuda', enabled=config['training']['mixed_precision']):
             output = model(data)
             loss = criterion(output, target)
         
@@ -288,7 +288,7 @@ def validate(model, test_loader, criterion, epoch, config, logger, rank=0):
         for data, target in test_loader:
             data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
             
-            with autocast(enabled=config['training']['mixed_precision']):
+            with autocast('cuda', enabled=config['training']['mixed_precision']):
                 output = model(data)
                 test_loss += criterion(output, target).item()
             
@@ -439,7 +439,7 @@ def main():
     
     # Loss function and scaler
     criterion = nn.CrossEntropyLoss()
-    scaler = GradScaler(enabled=config['training']['mixed_precision'])
+    scaler = GradScaler('cuda', enabled=config['training']['mixed_precision'])
     
     # Resume from checkpoint if specified
     start_epoch = 0

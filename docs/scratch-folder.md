@@ -1,18 +1,20 @@
 # SCRATCH FOLDER USAGE GUIDELINES
 
-The scratch space is designed for temporary storage of datasets and computational work. Files are automatically cleaned up after 30 days of no access.
+The scratch space is designed for temporary storage of datasets and computational work. Files are automatically cleaned up **30 days after they were last modified**. The `/scratch` filesystem is mounted `noatime`, so simply *reading/opening* a file is **not** tracked and does **not** keep it alive — only the modification time (mtime) counts. To preserve a file, modify it (or run `touch` on it) within the window, or move it to a permanent location (`/scratch/datasets/` for large shared data, or your home directory for small files).
 
 ## DIRECTORY STRUCTURE:
 The main directory can be found at /scratch/, with all the subfolders described as follow:
 
+```
 /scratch/
 ├── shared/     - Shared space for all users (group writable)
-├── temp/       - Temporary files (like /tmp, auto-cleaned frequently)
+├── temp/       - Temporary files (world-writable with sticky bit, like /tmp); subject to the same 30-day cleanup as other scratch areas
 ├── datasets/   - Shared datasets (group readable/writable, no expiration)
 └── users/      - Individual user directories
     ├── user1/  - Personal scratch space for user1
     ├── user2/  - Personal scratch space for user2
     └── ...
+```
 
 Each user, when created, should be automatically added to the scratch-users permission group, which grants write/read control over various locations in the scratch folder (see below). At the same time, a new user folder will be created in /scratch/users/ named after the username of the new user.
 
@@ -38,8 +40,10 @@ ln -s /scratch/datasets/reference_genome/ ./ref_genome
 # List available shared datasets
 ls /scratch/datasets/
 
-# Copy a dataset to your working directory (if you need to modify it)
-cp /scratch/datasets/common_crawl/ ./my_copy/
+# Copy a dataset to your working directory (if you need to modify it).
+# Use -r because datasets are directories; plain cp without -r fails on directories.
+# Better still: symlink instead of copying, to avoid wasting scratch space.
+cp -r /scratch/datasets/common_crawl/ ./my_copy/
 
 # Or work directly with the shared data (read-only recommended)
 analyze_tool --input /scratch/datasets/imaging_data/
@@ -54,40 +58,46 @@ mkdir -p $TMPDIR
 sort large_file.txt > $TMPDIR/sorted_output.txt
 ```
 
-## CHECKING FILE ACCESS TIMES AND CLEANUP STATUS
-### Find Files Approaching Deletion (30+ days old)
+## CHECKING MODIFICATION TIMES AND CLEANUP STATUS
+
+Cleanup is driven by **modification time (mtime)** only: a file is removed once 30 days have passed since it was last modified. (Because `/scratch` is mounted `noatime`, access time is not tracked and is ignored.) The checks below therefore test mtime.
+
+### Find Files Approaching Deletion
 ```bash
-# Check your personal scratch for files not accessed in 25+ days (warning)
-find /scratch/users/$USER/ -atime +25 -type f -ls
+# Check your personal scratch for files not modified in 23+ days
+# (23 days is when an email warning is sent; 30 days triggers deletion)
+find /scratch/users/$USER/ -type f -mtime +23 -ls
 
-# Find files not accessed for 29 days (imminent deletion)
-find /scratch/users/$USER/ -atime +29 -type f
+# Find files not modified in 30+ days (eligible for deletion now)
+find /scratch/users/$USER/ -type f -mtime +30
 
-# Check specific shared directories
-find /scratch/datasets/ -atime +25 -type f
+# Check specific shared directories (note: /scratch/datasets is exempt from cleanup)
+find /scratch/shared/ -type f -mtime +23
 ```
-### View Detailed File Access Information
+### View Detailed Modification Information
 ```bash
-# List files with last access time
-ls -lu /scratch/users/$USER/*
+# Detailed listing showing modification times (the default for ls -l)
+ls -la /scratch/users/$USER/
 
-# Detailed listing with access times
-ls -la --time=atime /scratch/users/$USER/
+# Sort by modification time, newest last
+ls -ltr /scratch/users/$USER/
 
-# Check when a specific file was last accessed
-stat /scratch/users/$USER/my_large_file.dat
+# Check exactly when a specific file was last modified
+stat /scratch/users/$USER/my_large_file.dat   # look at the "Modify:" line
 ```
-### Keeping Files Active (Resetting Access Time)
+### Keeping Files Active (Resetting Modification Time)
+
+To keep a file, its modification time must be within the last 30 days. Plain `touch` updates the modification time:
+
 ```bash
-# Touch files to update access time without modifying content
-touch -a /scratch/users/$USER/important_dataset.h5
+# Touch a file to reset its modification time to now
+touch /scratch/users/$USER/important_dataset.h5
 
-# Recursively update access times for a directory
-find /scratch/users/$USER/project_x/ -exec touch -a {} \;
-
-# Read files to reset access time (alternative method)
-cat /scratch/users/$USER/datafile > /dev/null
+# Recursively refresh modification times for a directory tree
+find /scratch/users/$USER/project_x/ -type f -exec touch {} \;
 ```
+
+Note: opening or reading a file (`cat file > /dev/null`, `touch -a`, etc.) does **not** help — only the modification time matters, and reads aren't tracked under `noatime`. The most reliable way to preserve important data is to move or copy it to a permanent location (your home directory for small files, or `/scratch/datasets/` for large shared files).
 
 # BEST PRACTICES
 Organize by project: 
@@ -104,15 +114,15 @@ Monitor usage regularly:
 du -sh /scratch/users/$USER/
 ```
 
-Set reminders: For important files approaching 30 days
+Set reminders: For important files approaching 30 days (you will also get an automated email warning once a file is 23 days stale)
 
 # IMPORTANT RULES:
 
-1. Files not accessed for 30 days will be automatically deleted
+1. Files not **modified** for 30 days will be automatically deleted (reads are not tracked — to keep a file, run plain `touch` on it within the window, or move it somewhere permanent)
 2. This is NOT a backup location - keep important files elsewhere
 3. Use appropriate subdirectories for your work
 4. Be respectful of shared space
-5. Large datasets should go in /scratch/datasets/ for sharing
+5. Large datasets should go in /scratch/datasets/ for sharing (that directory is exempt from automatic cleanup)
 
 # ACCESS PERMISSIONS:
 

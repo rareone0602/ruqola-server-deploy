@@ -130,7 +130,7 @@ System Administrator
 EOF
 )
 
-    # Send the email using ssmtp
+    # Send the email using msmtp
     echo "$MAIL" | sudo /usr/bin/msmtp "$email"
     echo "Sent account creation notification to $email"
 
@@ -161,7 +161,10 @@ process_csv() {
         username=$(echo "$username" | tr -d '"' | xargs)
         password=$(echo "$password" | tr -d '"' | xargs)
         fullname=$(echo "$fullname" | tr -d '"' | xargs)
-        email=$(echo "$fullname" | tr -d '"' | xargs)
+        # BUGFIX: clean the 4th CSV column (email), not the full-name field.
+        # Previously this read "$fullname", overwriting the email with the
+        # user's name so notifications and the GECOS email subfield were wrong.
+        email=$(echo "$email" | tr -d '"' | xargs)
         
         if create_user "$username" "$password" "$fullname" "$email"; then
             ((success_count++))
@@ -179,14 +182,14 @@ show_usage() {
 Research Group User Management Script
 
 Usage:
-    $0 users.csv                    # Create users from CSV
-    $0 --single username password   # Create single user
-    $0 --help                      # Show this help
+    $0 users.csv                                       # Create users from CSV
+    $0 --single username password "full name" email    # Create single user
+    $0 --help                                          # Show this help
 
 CSV Format (users.csv):
-    username,password,fullname
-    jsmith,mypassword123,John Smith
-    agarcia,securepass456,Ana Garcia
+    username,password,fullname,email
+    jsmith,mypassword123,John Smith,jsmith@example.com
+    agarcia,securepass456,Ana Garcia,agarcia@example.com
 
 Prerequisites:
     - Run as user with sudo privileges
@@ -218,7 +221,7 @@ main() {
             ;;
         --single)
             if [[ $# -ne 5 ]]; then
-                echo "Error: --single requires username and password"
+                echo "Error: --single requires username password \"full name\" email"
                 show_usage
                 exit 1
             fi

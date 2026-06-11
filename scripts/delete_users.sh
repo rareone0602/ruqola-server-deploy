@@ -334,6 +334,13 @@ main() {
             process_csv "$2" "$skip_backup"
             ;;
         *.csv)
+            # BUGFIX: honor --no-backup in the bare-CSV form too
+            # (e.g. "delete_users.sh users.csv --no-backup"), mirroring the
+            # --csv and --single cases. Previously $2 was ignored here, so the
+            # documented --no-backup option silently still created backups.
+            if [[ "$2" == "--no-backup" ]]; then
+                skip_backup="true"
+            fi
             confirm_deletion "users from $1"
             process_csv "$1" "$skip_backup"
             ;;

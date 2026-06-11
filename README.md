@@ -1,78 +1,69 @@
-# Mjölnir User Documentation
+# Ruqola Server Documentation
 
-Welcome to the Ruqola project NTU research server (aka Mjölnir)! This documentation provides comprehensive guidance for using our shared GPU computing resources effectively.
+Single source of truth for the **Ruqola project** compute servers:
 
-You can access a Jeckyll version of this documentation [here](https://ighina.github.io/ruqola-server-deploy/).
+- **Mjölnir (NTU)** — a shared box with **4× NVIDIA H200 NVL** GPUs (~141 GB each,
+  ~564 GB total), coordinated by the [`gpuq`](gpuq/README.md) cooperative queue.
+- **The Hopper (NUS)** — NUS's multi-node H100/H200 HPC cluster (PBS Pro).
 
-## 🖥️ Server Specifications
+📖 **Browse the docs in your browser:** <https://ighina.github.io/ruqola-server-deploy/>
 
-- **GPUs**: 3x NVIDIA H200 (80GB HBM3e each)
-- **Total GPU Memory**: 240GB
-- **Custom Queue Management**: Fair resource allocation system
+This repository merges what used to live in three places (the *Compute-New-Users*
+onboarding notes, the *NTU-Server-Guide* docs, and this deploy repo) into one
+self-contained, browsable site.
 
-## 📬 Notifications
+## How the site works
 
-The server is set up to send notifications to individual users and/or to administrator and general channels. If you receive such a notification or you want to familiarize yourself with the type of notifications the server sends, consult the following [**notification FAQ**](docs/notifications-faq.md).
+The site is a **single static `index.html`** that renders the Markdown files in
+this repo into a tabbed, sidebar-navigated page **in the browser** — no build step,
+no Jekyll. It works as plain static files on GitHub Pages (a `.nojekyll` marker
+disables Jekyll so the raw `.md` is served and fetched client-side).
 
-## 📚 Documentation Structure
+- **Editing docs:** just edit the Markdown under `docs/` (or `gpuq/README.md`,
+  `examples/README.md`). The site picks up changes automatically — the Markdown
+  *is* the source of truth.
+- **Adding a page / changing tabs:** edit the `MANIFEST` near the top of
+  `assets/app.js`.
+- **Preview locally** (browsers block `fetch()` over `file://`, so serve it):
+  ```bash
+  python3 -m http.server 8000   # then open http://localhost:8000
+  ```
 
-### For New Users
-- [**Bash Basics**](docs/bash-basics.md) - Essential command line skills for server usage
-- [**Server Best Practices**](docs/best-practices.md) - Guidelines for respectful resource sharing
+## Repository layout
 
-### Server Users Creation and Deletion
-- [**Create/Delete Users**](docs/users-creation.md) - Explain the two minimal scripts used to create and delete users either individually or from a csv file containing multiple users.
-
-### File System and Folders Structure
-- [**Users Quota**](docs/users-quota.md) - Explain the quotas system used to limit the disk space used by each user and some essential bash commands to check and manage quotas.  
-- [**Scratch Folder**](docs/scratch-folder.md) - Guidelines and information for use the scratch folder to store large datasets and programmes artifacts.
-
-### GPU Queue System
-- [**GPU Queue User Guide**](docs/gpu-queue-guide.md) - Comprehensive guide to job submission and monitoring
-- [**H200 GPU Specifications**](docs/h200-specs.md) - Technical details and capabilities
-- [**Custom Queue Setup**](gpuq/README.md) - Technical setup and administration (existing)
-
-### Deep Learning Frameworks
-- [**PyTorch with H200**](docs/pytorch-guide.md) - Optimized PyTorch usage and examples
-- [**TensorFlow/Keras with H200**](docs/tensorflow-guide.md) - TensorFlow setup and best practices
-- [**JAX/Flax with H200**](docs/jax-guide.md) - JAX configuration and usage patterns
-- [**Transformers with H200**](docs/transformers-guide.md) - Hugging Face Transformers for LLMs and fine-tuning
-
-### Examples and Scripts
-- [**Example Scripts**](examples/) - Ready-to-use scripts for common workflows
-- [**Troubleshooting**](docs/troubleshooting.md) - Common issues and solutions
-
-## 🚀 Quick Start
-
-1. **First Time Setup**: Read [Bash Basics](docs/bash-basics.md)
-2. **Familiarise yourself with file and folder structure**: Read [Users Quota](docs/users-quota.md) and [Scratch Folder](scratch-folder.md)
-3. **Submit Your First Job**: Check [GPU Queue Guide](docs/gpu-queue-guide.md)
-4. **Choose Your Framework**: Select from PyTorch, TensorFlow, or JAX guides
-5. **Optimize Your Code**: Review [Best Practices](docs/best-practices.md)
-
-## ⚡ Quick Commands
-
-```bash
-# Check GPU availability
-gpuq status
-
-# Submit a training job
-conda activate $your_environment
-gpuq submit --command "python train.py" --gpus 1 --time 8
-
-# Monitor GPUs in real-time
-nvidia-smi -l 1
-
-# Check your running jobs
-gpuq status | grep $USER
+```
+index.html            # the tabbed docs viewer
+.nojekyll             # serve raw .md (no Jekyll processing)
+assets/
+  app.js              # tabs + sidebar + router + Markdown rendering (edit MANIFEST here)
+  style.css           # site theme (light/dark)
+  vendor/             # marked.js + highlight.js (vendored, no CDN dependency)
+docs/                 # all documentation (Markdown — the source of truth)
+gpuq/                 # the gpuq queue tool: userspace.py, installers, tests, README, sample config
+examples/             # runnable training examples + configs
+scripts/              # admin scripts (user creation/deletion, quotas, scratch cleanup)
 ```
 
-## 📞 Getting Help
+## ⚡ Quick commands (Mjölnir)
 
-- **Technical Issues**: Contact your server administrator
-- **Documentation Updates**: Submit suggestions or corrections
-- **Queue System**: Check [gpuq/README.md](gpuq/README.md) for technical details
+```bash
+gpuq status                                   # see GPU + queue state
+gpuq submit -g 1 -t 8 -- python train.py      # run a job on 1 GPU, 8h limit
+gpuq submit -g 1 --notify you@example.com -- python train.py   # + email on finish
+gpuq status | grep "$USER"                    # your jobs
+nvidia-smi -l 1                               # live GPU usage
+```
+
+See the [GPU Queue guide](docs/gpu-queue-guide.md) for the full model (you own the
+GPUs allocated to you; pin specific cards with `--devices`, wait for them with
+`--queue`).
+
+## Contributing
+
+Edit the relevant Markdown, preview locally, and open a pull request. Keep docs
+factually aligned with the live server and with `gpuq/userspace.py`.
 
 ---
 
-*Last updated: September 2025*
+*Mjölnir hardware verified on host `wsserver1`: 4× H200 NVL, 256 CPUs, 755 GiB RAM,
+Ubuntu 24.04.4, driver 575.57.08, CUDA 12.9.*

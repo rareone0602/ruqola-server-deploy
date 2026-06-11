@@ -2,6 +2,8 @@
 
 Complete guide for optimizing TensorFlow and Keras workflows on the Ruqola server's H200 GPUs.
 
+The Ruqola server (host `wsserver1`, the NTU "Mjolnir" box) has **4 x NVIDIA H200 NVL** GPUs at indices `0,1,2,3`, each with ~141 GB VRAM (~564 GB total), compute capability **9.0** (Hopper). The host runs Ubuntu 24.04, GPU driver 575.57.08, CUDA (driver) 12.9.
+
 ## 📖 Table of Contents
 
 1. [Setup and Installation](#setup-and-installation)
@@ -19,25 +21,36 @@ Complete guide for optimizing TensorFlow and Keras workflows on the Ruqola serve
 ### Recommended TensorFlow Installation
 
 ```bash
-# CUDA 12.1 compatible TensorFlow (recommended for H200)
-pip install tensorflow[and-cuda]==2.15.0
+# Current TensorFlow with bundled CUDA libraries (recommended for H200).
+# The [and-cuda] extra self-selects a matching CUDA 12.x + cuDNN; you do not
+# pin the CUDA version yourself. The host driver is CUDA 12.9.
+pip install -U "tensorflow[and-cuda]"
 
-# Or with specific CUDA libraries
-pip install tensorflow==2.15.0 tensorrt
+# If you need to pin, use a recent release (>=2.16) for the best Hopper kernels:
+# pip install "tensorflow[and-cuda]>=2.16"
 
 # Verify GPU detection
 python -c "import tensorflow as tf; print('GPUs:', tf.config.list_physical_devices('GPU'))"
 ```
 
+The H200 reports compute capability **9.0** (Hopper, `sm_90`). Any reasonably current TF 2.x build supports it; newer releases ship better Hopper kernels.
+
 ### Environment Setup
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0  # Use first H200, or 0,1,2 for all
+export CUDA_VISIBLE_DEVICES=0      # Use first H200, or 0,1,2,3 for all four H200s
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 ```
+
+> **On the shared server, let gpuq pick your GPUs.** When you launch through
+> `gpuq submit`, it sets `CUDA_VISIBLE_DEVICES` for the GPU(s) you were allocated.
+> Do **not** hard-code `CUDA_VISIBLE_DEVICES` over a gpuq allocation — `gpuq audit`
+> watches for jobs running on a GPU other than the one they were assigned (rebind
+> detection) and will flag the override. Only set it manually for quick interactive
+> work outside the queue.
 
 ### Verify Installation
 
@@ -46,16 +59,16 @@ import tensorflow as tf
 
 print(f"TensorFlow version: {tf.__version__}")
 print(f"CUDA available: {tf.test.is_built_with_cuda()}")
-print(f"GPU available: {tf.test.is_gpu_available()}")
+print('GPU available:', bool(tf.config.list_physical_devices('GPU')))
 
 # List GPUs
 gpus = tf.config.list_physical_devices('GPU')
-print(f"Number of GPUs: {len(gpus)}")
+print(f"Number of GPUs: {len(gpus)}")  # expect 4 on this server
 
 for i, gpu in enumerate(gpus):
     print(f"GPU {i}: {gpu}")
     details = tf.config.experimental.get_device_details(gpu)
-    print(f"  Compute Capability: {details.get('compute_capability', 'N/A')}")
+    print(f"  Compute Capability: {details.get('compute_capability', 'N/A')}")  # (9, 0) for H200
 ```
 
 ### GPU Configuration
@@ -64,18 +77,25 @@ for i, gpu in enumerate(gpus):
 import tensorflow as tf
 
 # Configure GPU memory growth (recommended for H200)
-gpus = tf.config.experimental.list_physical_devices('GPU')
+gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
+        # Memory growth must be set before GPUs are initialized
         print(e)
 
-# Alternative: Set memory limit
+# Alternative: cap a GPU's VRAM with a logical device configuration.
+# There is NO tf.config.experimental.set_memory_limit() — use
+# set_logical_device_configuration() instead. This must run before the GPU
+# is initialized (i.e. before any tensor/op touches it).
 if gpus:
     try:
-        tf.config.experimental.set_memory_limit(gpus[0], 100 * 1024)  # 100GB limit
+        tf.config.set_logical_device_configuration(
+            gpus[0],
+            [tf.config.LogicalDeviceConfiguration(memory_limit=100 * 1024)],  # 100 GB cap, in MB
+        )
     except RuntimeError as e:
         print(e)
 ```
@@ -155,7 +175,8 @@ print_memory_usage()
 ```python
 import tensorflow as tf
 
-# Enable mixed precision globally
+# Enable mixed precision globally. On Hopper (H200) you can also use 'mixed_bfloat16',
+# which avoids loss scaling and is numerically robust.
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
 tf.keras.mixed_precision.set_global_policy(policy)
 
@@ -166,7 +187,7 @@ model = tf.keras.Sequential([
     tf.keras.layers.Dense(10, activation='softmax', dtype='float32')  # Output in float32
 ])
 
-# Compile with loss scaling
+# Compile with loss scaling (needed for float16; not needed for bfloat16)
 optimizer = tf.keras.optimizers.Adam()
 optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
 
@@ -207,7 +228,7 @@ model = tf.keras.Sequential([
 import tensorflow as tf
 
 # Enable memory growth
-gpus = tf.config.experimental.list_physical_devices('GPU')
+gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
@@ -291,17 +312,27 @@ model.compile(
 )
 ```
 
-### TensorRT Optimization
+XLA is the most portable, best-maintained way to squeeze throughput out of the H200 and is the recommended fast path for both training and inference.
+
+### TensorRT Optimization (legacy)
+
+> **Legacy / not recommended for new work.** The in-graph TF-TRT integration
+> (`tensorflow.python.compiler.tensorrt`) is effectively unmaintained, and the
+> standalone `tensorrt` pip wheel frequently mismatches the CUDA libraries
+> bundled with `tensorflow[and-cuda]`, breaking the integration. For H200
+> inference, prefer **XLA** (`jit_compile=True`) or export the model and serve it
+> through **standalone TensorRT**. On Hopper you can also target **BF16/FP8**
+> precision rather than only FP16.
 
 ```python
 import tensorflow as tf
 from tensorflow.python.compiler.tensorrt import trt_convert as trt
 
-# Convert model to TensorRT
+# Convert model to TensorRT (legacy TF-TRT path)
 def convert_to_tensorrt(saved_model_dir, output_dir):
     converter = trt.TrtGraphConverterV2(
         input_saved_model_dir=saved_model_dir,
-        precision_mode=trt.TrtPrecisionMode.FP16,  # Use FP16 for H200
+        precision_mode=trt.TrtPrecisionMode.FP16,  # H200 also supports BF16/FP8
         maximum_cached_engines=1
     )
     converter.convert()
@@ -343,7 +374,7 @@ def create_optimized_dataset(file_pattern, batch_size=128):
 # Configure for optimal performance
 dataset = create_optimized_dataset("train_*.tfrecord", batch_size=256)
 
-# Additional optimizations
+# Additional optimizations (the host has 256 logical CPUs, so feel free to raise these)
 options = tf.data.Options()
 options.threading.private_threadpool_size = 8
 options.threading.max_intra_op_parallelism = 8
@@ -381,6 +412,8 @@ def custom_training_loop(model, dataset, epochs=10):
 ```
 
 ## Multi-GPU Training
+
+The server has 4 H200s, so data-parallel training can scale up to 4 replicas.
 
 ### MirroredStrategy (Data Parallelism)
 
@@ -447,13 +480,24 @@ def multi_gpu_training():
 ### Multi-GPU Job Submission
 
 ```bash
-# Submit multi-GPU TensorFlow job
+# Submit a 4-GPU TensorFlow job (uses all four H200s).
+# -m/--memory is the MINIMUM free VRAM (GB) a candidate GPU must have to be
+# picked — it is an admission requirement, not a hard cap or reservation.
+# The job runs in the FOREGROUND in this terminal; redirect output yourself
+# if you want a log file.
 gpuq submit \
-  --command "python train_tensorflow.py --strategy=mirrored --gpus=2" \
-  --gpus 2 \
-  --memory 80 \
+  --command "python train_tensorflow.py --strategy=mirrored" \
+  --gpus 4 \
+  --memory 40 \
   --time 12
+
+# For a 2-GPU run, just ask for 2:
+gpuq submit --command "python train_tensorflow.py --strategy=mirrored" --gpus 2 --memory 40 --time 12
 ```
+
+> Inside the job, read `strategy.num_replicas_in_sync` rather than hard-coding a
+> GPU count — gpuq has already restricted `CUDA_VISIBLE_DEVICES` to the GPUs you
+> were allocated, and `MirroredStrategy()` will mirror across exactly those.
 
 ## Large Model Training
 
@@ -492,70 +536,80 @@ class LargeTransformer(tf.keras.Model):
         
         return self.final_layer(x)
 
-# Enable mixed precision for large models
-tf.keras.mixed_precision.set_global_policy('mixed_float16')
+# Enable mixed precision for large models (bfloat16 is a good default on Hopper)
+tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
 
 model = LargeTransformer(vocab_size=50000)
 ```
+
+With ~141 GB of VRAM per H200, a single card holds substantial models; use
+`MirroredStrategy` across the 4 GPUs (or model parallelism) only when one card is
+not enough.
 
 ### Hugging Face Transformers with TensorFlow
 
 ```python
 from transformers import TFAutoModelForCausalLM, AutoTokenizer
 
-# Load large model with TensorFlow
+tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
+
+# Load a large TF model. The gpt2-large repo ships native TF weights, so do NOT
+# pass from_tf=True (that flag means "convert a TF checkpoint into a PyTorch
+# model" and would error here).
 model = TFAutoModelForCausalLM.from_pretrained(
     "gpt2-large",
-    from_tf=True,
     use_cache=False,  # Save memory during training
 )
-
-# Enable gradient checkpointing
-model.gradient_checkpointing = True
-
-# Training with Hugging Face
-from transformers import TFTrainer, TFTrainingArguments
-
-training_args = TFTrainingArguments(
-    output_dir="./results",
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=8,
-    num_train_epochs=3,
-    fp16=True,
-    dataloader_num_workers=8,
-    save_strategy="steps",
-    save_steps=1000,
-)
-
-trainer = TFTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    tokenizer=tokenizer,
-)
-
-trainer.train()
 ```
 
-### Model Parallelism with Mesh TensorFlow
+> **No `TFTrainer` / `TFTrainingArguments`.** Those classes were deprecated and
+> then **removed** from Hugging Face `transformers` — importing them from a
+> current release raises `ImportError`. For a TF model, train with the native
+> Keras flow (`model.compile()` + `model.fit()`); if you would rather use the
+> Hugging Face `Trainer` abstraction, switch to a PyTorch model and the PyTorch
+> `Trainer` (see the [Transformers guide](transformers-guide.md)).
 
 ```python
 import tensorflow as tf
-import mesh_tensorflow as mtf
+
+# Enable mixed precision (bfloat16 on Hopper avoids loss scaling)
+tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+
+# Keras-native training for the TF model
+optimizer = tf.keras.optimizers.AdamW(learning_rate=5e-5)
+model.compile(optimizer=optimizer)  # HF TF models compute their own loss
+
+model.fit(
+    train_dataset,        # a tf.data.Dataset yielding the model's expected inputs
+    validation_data=val_dataset,
+    epochs=3,
+)
+model.save_pretrained("./results")
+```
+
+### Model Parallelism
+
+> **Mesh TensorFlow is abandoned** and is not recommended on a current TF 2.x.
+> For model/tensor parallelism today, use **Keras + DTensor** within TensorFlow,
+> or use **JAX** (see the [JAX with H200 Guide](jax-guide.md)), which has
+> first-class sharding (`jax.sharding.Mesh` / `PartitionSpec` /
+> `jax.jit(in_shardings=...)`). The fragment below is illustrative legacy
+> pseudo-code only and will not run as-is.
+
+```python
+# LEGACY / illustrative only — Mesh TensorFlow is unmaintained.
+import tensorflow as tf
+import mesh_tensorflow as mtf  # not maintained; may not install on current TF
 
 def create_mesh_model(mesh_shape, layout):
-    # Define mesh for model parallelism
     mesh = mtf.Mesh(tf.Graph(), 'mesh')
-    
-    # Model parallelism across H200s
+    # Model parallelism across H200s (pseudo-code; `inputs` is undefined)
     with mesh:
-        # Define model with mesh dimensions
         model = mtf.layers.dense(
             inputs,
             output_dim=mtf.Dimension('vocab', 50000),
             mesh_impl=mesh
         )
-    
     return model
 ```
 
@@ -705,7 +759,7 @@ import tensorflow as tf
 tf.config.run_functions_eagerly(True)
 
 # Enable memory growth to avoid OOM
-gpus = tf.config.experimental.list_physical_devices('GPU')
+gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
@@ -737,7 +791,7 @@ for x_batch, y_batch in dataset:
 #!/usr/bin/env python3
 """
 H200-Optimized TensorFlow Training Script
-Usage: gpuq submit --command "python train_tf_h200.py --config config.json" --gpus 1 --memory 80
+Usage: gpuq submit --command "python train_tf_h200.py --config config.json" --gpus 1 --memory 40
 """
 
 import tensorflow as tf
@@ -759,7 +813,7 @@ def setup_logging():
 
 def setup_gpu(config):
     """Configure GPU settings for H200"""
-    gpus = tf.config.experimental.list_physical_devices('GPU')
+    gpus = tf.config.list_physical_devices('GPU')
     
     if gpus:
         try:
@@ -767,16 +821,23 @@ def setup_gpu(config):
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
             
-            # Set memory limit if specified
+            # Optionally cap VRAM via a logical device configuration.
+            # NOTE: there is no tf.config.experimental.set_memory_limit();
+            # use set_logical_device_configuration() instead, before the GPU
+            # is initialized.
             if config.get('gpu_memory_limit'):
-                tf.config.experimental.set_memory_limit(
-                    gpus[0], 
-                    config['gpu_memory_limit'] * 1024
+                tf.config.set_logical_device_configuration(
+                    gpus[0],
+                    [tf.config.LogicalDeviceConfiguration(
+                        memory_limit=config['gpu_memory_limit'] * 1024  # MB
+                    )],
                 )
             
             logging.info(f"Configured {len(gpus)} GPUs")
             
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # Memory growth / logical device config must be set before init;
+            # catch both RuntimeError and ValueError.
             logging.error(f"GPU configuration error: {e}")
 
 def create_model(config):
@@ -895,7 +956,7 @@ def main():
     for epoch in range(config['training']['epochs']):
         logging.info(f'Starting epoch {epoch+1}/{config["training"]["epochs"]}')
         
-        metric.reset_states()
+        metric.reset_state()
         avg_loss = train_epoch(model, train_dataset, optimizer, loss_fn, metric)
         
         epoch_accuracy = metric.result().numpy()
@@ -961,16 +1022,18 @@ if __name__ == '__main__':
 SCRIPT_PATH="train_tf_h200.py"
 CONFIG_PATH="config.json"
 GPUS=1
-MEMORY=100
+MEMORY=40   # MINIMUM free VRAM (GB) a candidate GPU must have to be selected
 TIME=12
 
+# gpuq is daemonless: the job runs in the FOREGROUND in this terminal. There
+# are no per-job log files — redirect the output yourself if you want one.
 gpuq submit \
   --command "python $SCRIPT_PATH --config $CONFIG_PATH" \
   --gpus $GPUS \
   --memory $MEMORY \
   --time $TIME
 
-echo "TensorFlow job submitted! Monitor with: gpuq status"
+echo "TensorFlow job finished. Check live status of other jobs with: gpuq status"
 ```
 
 ---

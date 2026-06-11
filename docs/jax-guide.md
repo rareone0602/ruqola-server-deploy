@@ -2,7 +2,9 @@
 
 Complete guide for optimizing JAX and Flax workflows on the Ruqola server's H200 GPUs.
 
-## 📖 Table of Contents
+The Ruqola server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices `0,1,2,3`), each with ~141 GB of VRAM (~564 GB total), compute capability 9.0 (Hopper). The host runs Ubuntu 24.04 with GPU driver 575.57.08 and a CUDA 12.9 driver stack. All "use every GPU" examples below assume 4 devices, but prefer deriving the count dynamically with `len(jax.devices())` instead of hard-coding it.
+
+## Table of Contents
 
 1. [Setup and Installation](#setup-and-installation)
 2. [Basic GPU Usage](#basic-gpu-usage)
@@ -19,8 +21,8 @@ Complete guide for optimizing JAX and Flax workflows on the Ruqola server's H200
 ### Recommended JAX Installation
 
 ```bash
-# CUDA 12.1 compatible JAX (recommended for H200)
-pip install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# CUDA 12 JAX wheels (server runs CUDA 12.9 driver, H200 sm_90)
+pip install -U "jax[cuda12]"
 
 # Additional packages
 pip install flax optax orbax-checkpoint
@@ -30,11 +32,15 @@ pip install chex ml_collections wandb
 python -c "import jax; print('JAX version:', jax.__version__); print('Devices:', jax.devices())"
 ```
 
+The modern `jax[cuda12]` extra bundles the CUDA libraries as pip wheels, so the
+legacy `jax[cuda12_pip]` extra and the `-f .../jax_cuda_releases.html` find-links
+URL are no longer needed (and have been removed in recent JAX).
+
 ### Environment Setup
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0  # Use first H200, or 0,1,2 for all
+export CUDA_VISIBLE_DEVICES=0  # Use first H200, or 0,1,2,3 for all
 export XLA_PYTHON_CLIENT_PREALLOCATE=false  # Dynamic memory allocation
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 ```
@@ -53,15 +59,19 @@ print(f"Default device: {jax.devices()[0]}")
 # Check H200 capabilities
 for i, device in enumerate(devices()):
     print(f"Device {i}: {device}")
-    print(f"  Device kind: {device.device_kind}")
-    print(f"  Platform: {device.platform}")
+    print(f"  Device kind: {device.device_kind}")  # e.g. 'NVIDIA H200 NVL'
+    print(f"  Platform: {device.platform}")        # e.g. 'gpu'
 
 # Simple computation test
 x = jnp.array([1.0, 2.0, 3.0])
 y = jnp.array([4.0, 5.0, 6.0])
 result = jnp.dot(x, y)
-print(f"Dot product result: {result} (computed on {result.device()})")
+print(f"Dot product result: {result} (computed on {result.device})")
 ```
+
+> Note: array placement is read via the `.device` **property** (not a method).
+> The old callable `arr.device()` was deprecated in JAX v0.4.21 and removed in
+> v0.4.27, so `result.device()` now raises an error — use `result.device`.
 
 ## Basic GPU Usage
 
@@ -83,7 +93,7 @@ y = jnp.array([[5.0, 6.0], [7.0, 8.0]])
 
 # Matrix multiplication on GPU
 result = jnp.dot(x, y)
-print(f"Result device: {result.device()}")
+print(f"Result device: {result.device}")
 
 # Element-wise operations
 z = x + y
@@ -132,7 +142,7 @@ params = init_network_params(layer_sizes, key)
 # Test forward pass
 x_test = random.normal(key, (32, 784))  # Batch of 32 samples
 output = forward_pass(params, x_test)
-print(f"Output shape: {output.shape}, Device: {output.device()}")
+print(f"Output shape: {output.shape}, Device: {output.device}")
 ```
 
 ### Training Loop Basics
@@ -188,32 +198,46 @@ for epoch in range(10):
 import os
 import jax
 
-# Enable dynamic memory allocation (recommended for H200)
+# Enable dynamic memory allocation (recommended on the shared H200 box).
+# IMPORTANT: set these BEFORE jax/jaxlib is first imported, e.g. at the very
+# top of your script or in the job's environment.
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
-# Alternative: Set memory fraction
-os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'  # Use 90% of GPU memory
+# Pick ONE strategy — these two are mutually exclusive:
+#   * PREALLOCATE=false               -> grow memory on demand (polite default
+#                                        on a shared box; co-tenant jobs can be
+#                                        stacked onto the same GPU by gpuq).
+#   * PREALLOCATE=true + MEM_FRACTION -> a single up-front preallocation capped
+#                                        at the given fraction of the card.
+# MEM_FRACTION only governs the size of that up-front preallocation, so it has
+# NO effect once PREALLOCATE=false. Do not set both expecting a soft cap.
+#
+# Example of the capped-preallocation strategy (note: ~0.9 of a 141 GB H200 is
+# ~127 GB, a large reservation on a shared server — prefer a modest fraction):
+# os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'true'
+# os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.5'
 
-# Check memory usage
+# Check per-device memory usage
 def print_memory_usage():
-    try:
-        # This requires jax-cuda extensions
-        import jax.lib.xla_bridge as xb
-        backend = xb.get_backend('gpu')
-        print(f"GPU memory usage: {backend.get_stats()}")
-    except:
-        print("Memory stats not available")
+    for d in jax.devices():
+        try:
+            stats = d.memory_stats()  # dict with bytes_in_use / bytes_limit, etc.
+            in_use = stats.get('bytes_in_use', 0) / 1024**3
+            limit = stats.get('bytes_limit', 0) / 1024**3
+            print(f"{d}: {in_use:.2f} GiB in use / {limit:.2f} GiB limit")
+        except Exception:
+            print(f"{d}: memory stats not available")
 ```
 
 ### Gradient Checkpointing with JAX
 
 ```python
-from jax.experimental import remat
+from jax import checkpoint  # public API (aka jax.remat); jax.experimental.remat is gone
 
 def create_checkpointed_model(layers):
     """Create model with gradient checkpointing"""
     
-    @remat
+    @checkpoint
     def checkpointed_layer(x, params):
         W, b = params
         return jnp.maximum(0, jnp.dot(x, W) + b)
@@ -230,6 +254,8 @@ def create_checkpointed_model(layers):
 
 # Use checkpointed model for memory efficiency
 checkpointed_forward = create_checkpointed_model(params)
+
+# For Flax modules, use flax.linen.remat to checkpoint a submodule instead.
 ```
 
 ### Mixed Precision Training
@@ -240,12 +266,13 @@ from jax import grad, jit
 
 def mixed_precision_forward(params, x):
     """Forward pass with mixed precision"""
-    # Convert to half precision for computation
-    x = x.astype(jnp.float16)
+    # Convert to half precision for computation. On Hopper, bfloat16 is usually
+    # preferred over float16 for training (wider dynamic range, no loss scaling).
+    x = x.astype(jnp.bfloat16)
     
     for W, b in params[:-1]:
-        W = W.astype(jnp.float16)
-        b = b.astype(jnp.float16)
+        W = W.astype(jnp.bfloat16)
+        b = b.astype(jnp.bfloat16)
         x = jnp.maximum(0, jnp.dot(x, W) + b)
     
     # Final layer in float32 for numerical stability
@@ -431,7 +458,15 @@ def ensure_optimal_shapes(x, target_multiple=8):
     return x
 ```
 
+The four H200 NVL cards deliver roughly ~836 TFLOP/s of empirical dense BF16
+tensor-core matmul throughput each, so keeping matmul dimensions as multiples of
+8 (ideally 16) lets XLA hit the Tensor Cores.
+
 ## Multi-GPU Training
+
+The server exposes 4 H200 devices, so prefer `num_devices = len(jax.devices())`
+over a hard-coded count — this keeps your code correct if a card is masked out
+via `CUDA_VISIBLE_DEVICES` or if the hardware changes.
 
 ### Data Parallelism with pmap
 
@@ -440,7 +475,7 @@ import jax
 from jax import pmap, devices, device_put_replicated
 import jax.numpy as jnp
 
-# Check available devices
+# Check available devices (4 on this server, unless masked)
 num_devices = len(devices())
 print(f"Available devices: {num_devices}")
 
@@ -498,43 +533,55 @@ for epoch in range(num_epochs):
         print(f"Average loss: {avg_loss:.4f}")
 ```
 
-### Model Parallelism with mesh
+### Model Parallelism with a Mesh and jax.jit
+
+Modern JAX does model/tensor parallelism through `jax.sharding` plus a sharding-
+aware `jax.jit`. The old `jax.experimental.pjit.pjit`,
+`jax.experimental.PartitionSpec`, and `jax.experimental.Mesh` symbols have been
+removed and will raise `ImportError`/`AttributeError` on a current
+`jax[cuda12]`. Use `jax.sharding.Mesh` / `PartitionSpec` / `NamedSharding`, and
+pass shardings to `jax.jit` via `in_shardings`/`out_shardings`.
 
 ```python
 import jax
-from jax.experimental import mesh_utils, PartitionSpec
-from jax.experimental.pjit import pjit
+import jax.numpy as jnp
+from jax import random
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
-# Create device mesh for model parallelism
-devices_array = mesh_utils.create_device_mesh((1, 3))  # 1x3 for 3 H200s
-mesh = jax.experimental.Mesh(devices_array, ('data', 'model'))
+# Create a device mesh for model parallelism across all available H200s.
+# Derive the count dynamically rather than hard-coding it (4 on this box).
+num_devices = len(jax.devices())
+devices_array = mesh_utils.create_device_mesh((1, num_devices))  # 1 x N for N H200s
+mesh = Mesh(devices_array, ('data', 'model'))
 
-def create_sharded_params(layer_sizes, key, mesh):
-    """Create parameters sharded across model dimension"""
-    with mesh:
-        params = []
-        keys = random.split(key, len(layer_sizes))
+# Helper to turn a PartitionSpec into a concrete Sharding on this mesh.
+def shard(spec):
+    return NamedSharding(mesh, PartitionSpec(*spec))
+
+def create_sharded_params(layer_sizes, key):
+    """Create parameters sharded across the model dimension"""
+    params = []
+    keys = random.split(key, len(layer_sizes))
+    
+    for i in range(len(layer_sizes) - 1):
+        W_key, b_key = random.split(keys[i])
         
-        for i in range(len(layer_sizes) - 1):
-            W_key, b_key = random.split(keys[i])
-            
-            # Shard weight matrix along output dimension
-            W = random.normal(W_key, (layer_sizes[i], layer_sizes[i + 1]))
-            W = jax.device_put(W, PartitionSpec(None, 'model'))
-            
-            # Replicate bias
-            b = jnp.zeros(layer_sizes[i + 1])
-            b = jax.device_put(b, PartitionSpec('model'))
-            
-            params.append((W, b))
+        # Shard the weight matrix along its output dimension
+        W = random.normal(W_key, (layer_sizes[i], layer_sizes[i + 1]))
+        W = jax.device_put(W, shard((None, 'model')))
         
-        return params
+        # Shard the bias along the model dimension
+        b = jnp.zeros(layer_sizes[i + 1])
+        b = jax.device_put(b, shard(('model',)))
+        
+        params.append((W, b))
+    
+    return params
 
-# Sharded forward pass
-@pjit(
-    in_shardings=(PartitionSpec(None, 'model'), PartitionSpec('data', None)),
-    out_shardings=PartitionSpec('data', None)
-)
+# Sharded forward pass: a plain jitted function; shardings on the inputs flow
+# through automatically (no @pjit decorator needed).
+@jax.jit
 def sharded_forward_pass(params, x):
     """Forward pass with model parallelism"""
     for W, b in params[:-1]:
@@ -543,36 +590,72 @@ def sharded_forward_pass(params, x):
     W, b = params[-1]
     return jnp.dot(x, W) + b
 
+def _sharded_train_step(params, opt_state, batch_x, batch_y):
+    def loss_fn(p):
+        logits = sharded_forward_pass(p, batch_x)
+        return optax.softmax_cross_entropy_with_integer_labels(logits, batch_y).mean()
+    
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    updates, opt_state = optimizer.update(grads, opt_state)
+    params = optax.apply_updates(params, updates)
+    
+    return params, opt_state, loss
+
 # Use model parallelism
 with mesh:
-    sharded_params = create_sharded_params(layer_sizes, key, mesh)
+    sharded_params = create_sharded_params(layer_sizes, key)
     
-    # Training step with sharding
-    @pjit(
-        in_shardings=(PartitionSpec(None, 'model'), None, PartitionSpec('data', None), PartitionSpec('data')),
-        out_shardings=(PartitionSpec(None, 'model'), None, None)
+    # Build the training step with explicit input/output shardings via jax.jit.
+    sharded_train_step = jax.jit(
+        _sharded_train_step,
+        in_shardings=(
+            None,                       # params keep their existing shardings
+            None,                       # opt_state likewise
+            shard(('data', None)),      # inputs sharded along the data axis
+            shard(('data',)),           # labels sharded along the data axis
+        ),
+        out_shardings=(None, None, None),
     )
-    def sharded_train_step(params, opt_state, batch_x, batch_y):
-        def loss_fn(p):
-            logits = sharded_forward_pass(p, batch_x)
-            return optax.softmax_cross_entropy_with_integer_labels(logits, batch_y).mean()
-        
-        loss, grads = jax.value_and_grad(loss_fn)(params)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
-        
-        return params, opt_state, loss
 ```
+
+For finer control inside a jitted function, use
+`jax.lax.with_sharding_constraint(x, NamedSharding(mesh, PartitionSpec(...)))`
+to pin intermediate values to a particular layout.
 
 ### Multi-GPU Job Submission
 
+`gpuq` is daemonless: `gpuq submit` runs your job in the **foreground** of the
+current terminal (its stdout/stderr stay in your terminal — redirect to a file
+yourself if you want a log). It does not write per-job log files.
+
 ```bash
-# Submit multi-GPU JAX job
+# Submit a multi-GPU JAX job that uses all four H200 cards
 gpuq submit \
-  --command "python train_jax_multi.py --num-devices=3 --model-parallel" \
-  --gpus 3 \
-  --memory 80 \
-  --time 16
+  --command "python train_jax_multi.py --num-devices=4 --model-parallel" \
+  --gpus 4 \           # claim 4 whole GPUs (the box has 4 x H200 NVL, ~141 GB each)
+  --memory 100 \       # selection floor: only pick GPUs with >= 100 GB FREE VRAM
+  --time 16            # max runtime in hours; the job is killed past this
+```
+
+A few things worth knowing about these flags (per `gpuq` itself):
+
+- `--gpus N` claims `N` whole GPUs chosen at random among the free cards. Use
+  `--gpus 4` for all four; use a smaller number for a partial run.
+- `--memory GB` is **not** a per-GPU reservation or a hard cap on your job — it
+  is the *minimum free VRAM a candidate GPU must have to be selected* (an
+  admission floor). `--memory 100` simply means "only schedule me on a GPU with
+  at least 100 GB free right now."
+- `--devices 0,1` pins exact cards (the count is taken from the list). Pinning
+  is rejected immediately if any listed GPU is held by another user, **unless**
+  you also pass `--queue`, in which case it waits until all of them are free or
+  already yours.
+- `--queue` waits and polls instead of exiting when no slot is free.
+- `--notify you@example.com` overrides the completion-notice address (by default
+  the address read from your account). There is no `--email` flag.
+
+```bash
+# Pin specific cards and wait for them if they are busy
+gpuq submit --devices 0,1 --queue -- python train_jax_multi.py --num-devices=2
 ```
 
 ## Large Model Training
@@ -684,10 +767,10 @@ def create_train_state(model, learning_rate, weight_decay):
         tx=optimizer
     )
 
-# Checkpointing manager
+# Checkpoint manager (current Orbax API: pass options, save/restore with ocp.args).
+# The old positional ocp.PyTreeCheckpointer() argument is deprecated.
 checkpoint_manager = ocp.CheckpointManager(
     'checkpoints/',
-    ocp.PyTreeCheckpointer(),
     options=ocp.CheckpointManagerOptions(
         save_interval_steps=1000,
         max_to_keep=3,
@@ -734,9 +817,9 @@ for step in range(num_training_steps):
     if step % 100 == 0:
         print(f"Step {step}, Loss: {loss:.4f}")
     
-    # Save checkpoint
+    # Save checkpoint (current Orbax API uses ocp.args.StandardSave)
     if step % 1000 == 0:
-        checkpoint_manager.save(step, state)
+        checkpoint_manager.save(step, args=ocp.args.StandardSave(state))
 ```
 
 ## Advanced Techniques
@@ -875,26 +958,33 @@ def contrastive_loss(embeddings1, embeddings2, labels, margin=1.0):
 
 ### JAX Profiling
 
+There are two independent profiling mechanisms — use whichever fits, but do not
+mix them. `start_trace`/`stop_trace` captures a trace of a region to disk, while
+`start_server(port)` launches a long-lived profiler server (called **once** at
+program startup) for on-demand capture from TensorBoard.
+
 ```python
 import jax
 import jax.profiler
 
+# (a) Trace a specific region and write it to disk
 def profile_training_step():
-    """Profile training step performance"""
-    
-    # Start profiling
+    """Profile a window of training steps"""
     jax.profiler.start_trace("/tmp/jax_trace")
-    
-    # Your training code
-    for step in range(100):
-        batch = next(dataloader)
-        state, loss = train_step(state, batch)
-        
-        if step == 50:  # Profile middle section
-            jax.profiler.start_server(9999)  # Start profiler server
-    
-    # Stop profiling
-    jax.profiler.stop_trace()
+    try:
+        for step in range(100):
+            batch = next(dataloader)
+            state, loss = train_step(state, batch)
+    finally:
+        jax.profiler.stop_trace()
+
+# (b) Alternatively, start the on-demand profiler server ONCE at startup and
+#     capture profiles from TensorBoard while the program runs:
+#
+#     jax.profiler.start_server(9999)
+#
+#     Do this once near the top of your program — never inside the training loop
+#     (re-binding the port would error).
 
 # Use JAX debugging utilities
 def debug_shapes_and_dtypes(pytree, name="PyTree"):
@@ -931,17 +1021,20 @@ def memory_monitor(interval=5):
     
     def monitor():
         while True:
-            # System memory
+            # System memory (the host has 755 GiB RAM)
             memory = psutil.virtual_memory()
             print(f"System RAM: {memory.percent:.1f}% used, {memory.available/1024**3:.1f}GB available")
             
-            # JAX memory (if available)
+            # JAX per-device memory
             try:
-                devices = jax.devices()
-                for i, device in enumerate(devices):
-                    if device.device_kind == 'gpu':
-                        # This is a simplified version - actual memory tracking in JAX is limited
-                        print(f"GPU {i}: {device}")
+                for i, device in enumerate(jax.devices()):
+                    if device.platform == 'gpu':  # platform is 'gpu'; device_kind is the model name
+                        try:
+                            stats = device.memory_stats()
+                            in_use = stats.get('bytes_in_use', 0) / 1024**3
+                            print(f"GPU {i} ({device.device_kind}): {in_use:.2f} GiB in use")
+                        except Exception:
+                            print(f"GPU {i}: {device}")
             except Exception as e:
                 print(f"GPU memory info not available: {e}")
             
@@ -954,6 +1047,10 @@ def memory_monitor(interval=5):
 # Start memory monitoring
 memory_thread = memory_monitor(interval=10)
 ```
+
+> Note: a JAX device's `.platform` is `'gpu'`, while `.device_kind` is the model
+> string (e.g. `'NVIDIA H200 NVL'`). Test `device.platform == 'gpu'` — comparing
+> `device_kind == 'gpu'` is always False and would silently skip every card.
 
 ## Example Scripts
 
@@ -1101,10 +1198,9 @@ def main():
     # Create training state
     state = create_train_state(model, params, config)
     
-    # Setup checkpointing
+    # Setup checkpointing (current Orbax API: options-only constructor)
     checkpoint_manager = ocp.CheckpointManager(
         config.checkpoint_dir,
-        ocp.PyTreeCheckpointer(),
         options=ocp.CheckpointManagerOptions(
             save_interval_steps=config.save_interval,
             max_to_keep=3,
@@ -1113,7 +1209,9 @@ def main():
     
     # Resume from checkpoint if specified
     if args.resume:
-        state = checkpoint_manager.restore(args.resume)
+        state = checkpoint_manager.restore(
+            int(args.resume), args=ocp.args.StandardRestore(state)
+        )
         logging.info(f"Resumed from checkpoint: {args.resume}")
     
     # Create data loaders (implement based on your data)
@@ -1153,7 +1251,7 @@ def main():
             
             # Checkpointing
             if step % config.save_interval == 0:
-                checkpoint_manager.save(step, state)
+                checkpoint_manager.save(step, args=ocp.args.StandardSave(state))
                 logging.info(f"Checkpoint saved at step {step}")
         
         # Epoch summary
@@ -1162,7 +1260,7 @@ def main():
         logging.info(f"Epoch {epoch+1} completed - Loss: {avg_loss:.4f}, Accuracy: {avg_accuracy:.4f}")
     
     # Final checkpoint
-    checkpoint_manager.save(step, state)
+    checkpoint_manager.save(step, args=ocp.args.StandardSave(state))
     logging.info("Training completed!")
 
 if __name__ == '__main__':

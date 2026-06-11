@@ -1,54 +1,73 @@
 # NVIDIA H200 GPU Specifications and Capabilities
 
-Technical specifications and optimization guidelines for the NVIDIA H200 Tensor Core GPUs in the Ruqola server.
+Technical specifications and optimization guidelines for the NVIDIA H200 NVL Tensor Core GPUs in the Ruqola server.
 
 ## 📖 Table of Contents
 
-1. [Hardware Specifications](#hardware-specifications)
-2. [Memory Architecture](#memory-architecture)
-3. [Compute Capabilities](#compute-capabilities)
-4. [Performance Characteristics](#performance-characteristics)
-5. [Optimization Guidelines](#optimization-guidelines)
-6. [Comparison with Other GPUs](#comparison-with-other-gpus)
-7. [Best Use Cases](#best-use-cases)
+1. [Host and Software Summary](#host-and-software-summary)
+2. [Hardware Specifications](#hardware-specifications)
+3. [Memory Architecture](#memory-architecture)
+4. [Compute Capabilities](#compute-capabilities)
+5. [Performance Characteristics](#performance-characteristics)
+6. [Optimization Guidelines](#optimization-guidelines)
+7. [Comparison with Other GPUs](#comparison-with-other-gpus)
+8. [Best Use Cases](#best-use-cases)
+
+## Host and Software Summary
+
+A quick reference for the live Ruqola server (host `wsserver1`, the NTU "Mjolnir" machine). These are the authoritative numbers — always prefer a live `nvidia-smi` over any datasheet figure if they ever disagree.
+
+| Item | Value |
+|------|-------|
+| **GPUs** | 4 × NVIDIA H200 NVL (indices 0, 1, 2, 3) |
+| **Per-GPU VRAM** | ~141 GB (nvidia-smi reports 143,771 MiB ≈ 140 GiB) |
+| **Total GPU VRAM** | ~564 GB across the 4 cards |
+| **GPU driver** | 575.57.08 |
+| **CUDA (driver) version** | 12.9 |
+| **Logical CPUs** | 256 |
+| **System RAM** | 755 GiB |
+| **Operating system** | Ubuntu 24.04.4 LTS |
+
+> A 4th GPU was added on 2025-06-10. The server now has **exactly 4 GPUs**; older docs that say "3" are out of date. When you want to use every card, address indices `0,1,2,3` (e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`, `gpuq submit -g 4`).
 
 ## Hardware Specifications
 
-### NVIDIA H200 SXM Overview
+### NVIDIA H200 NVL Overview
 
-Our server is equipped with **3x NVIDIA H200 SXM5** GPUs with the following specifications:
+Our server is equipped with **4x NVIDIA H200 NVL** GPUs (compute capability 9.0, Hopper) with the following per-GPU specifications:
 
 | Specification | Value |
 |---------------|-------|
-| **GPU Architecture** | Hopper (GH200) |
+| **GPU Architecture** | Hopper (GH100 die) |
 | **Process Node** | TSMC 4N (4nm) |
 | **Transistors** | 80 billion |
-| **SM (Streaming Multiprocessors)** | 134 |
-| **CUDA Cores** | 16,896 |
-| **RT Cores** | 4th Gen (134 units) |
+| **SM (Streaming Multiprocessors)** | 132 (full GH100) |
+| **CUDA Cores (FP32)** | 16,896 |
 | **Tensor Cores** | 4th Gen (528 units) |
-| **Base Clock** | 1,830 MHz |
-| **Boost Clock** | 2,600 MHz |
+| **Base Clock** | ~1,365 MHz (NVL datasheet) |
+| **Max SM (Boost) Clock** | ~1,785 MHz (live `clocks.max.sm`) |
+
+> Datacenter Hopper GPUs (H100/H200) ship **without RT cores** — graphics ray-tracing units are not present on these compute parts. Any spec sheet that lists "RT Cores" for an H200 is describing a different (consumer) product.
 
 ### Memory Specifications
 
-| Memory Feature | H200 SXM5 |
-|----------------|-----------|
+| Memory Feature | H200 NVL |
+|----------------|----------|
 | **Memory Type** | HBM3e |
-| **Memory Capacity** | 141 GB |
+| **Memory Capacity** | ~141 GB (143,771 MiB) |
 | **Memory Bandwidth** | 4,800 GB/s |
 | **Memory Bus Width** | 5,120-bit |
 | **L2 Cache** | 50 MB |
-| **Memory Clock** | 4,800 MHz |
+| **Max Memory Clock** | 3,201 MHz (live `clocks.max.memory`) |
 
 ### Power and Thermal
 
 | Specification | Value |
 |---------------|-------|
-| **Total Graphics Power (TGP)** | 700W |
-| **Form Factor** | SXM5 |
-| **Cooling** | Liquid Cooling Required |
-| **Operating Temperature** | 0°C to 35°C |
+| **Power Cap (max limit)** | 600W (live `power.max_limit`) |
+| **Form Factor** | PCIe (NVL, dual-slot) |
+| **Cooling** | Air-cooled in this NVL configuration |
+| **Operating Temperature** | 0°C to 35°C ambient |
 
 ## Memory Architecture
 
@@ -58,11 +77,11 @@ The H200's HBM3e memory system provides exceptional bandwidth and capacity:
 
 ```
 ┌─────────────────────────────────────┐
-│           GPU Die (GH200)           │
+│        GPU Die (GH100 / Hopper)     │
 ├─────────────────────────────────────┤
 │  L2 Cache: 50 MB (Shared)          │
 ├─────────────────────────────────────┤
-│  HBM3e Memory: 141 GB              │
+│  HBM3e Memory: ~141 GB             │
 │  Bandwidth: 4,800 GB/s             │
 │  5,120-bit Memory Interface        │
 └─────────────────────────────────────┘
@@ -72,9 +91,9 @@ The H200's HBM3e memory system provides exceptional bandwidth and capacity:
 
 1. **Registers** (per thread): ~255 registers × 32-bit
 2. **Shared Memory** (per SM): 228 KB configurable
-3. **L1 Cache** (per SM): 128 KB
+3. **L1 Cache** (per SM): 256 KB
 4. **L2 Cache** (global): 50 MB
-5. **HBM3e** (global): 141 GB at 4,800 GB/s
+5. **HBM3e** (global): ~141 GB at 4,800 GB/s
 
 ### Memory Bandwidth Utilization
 
@@ -122,15 +141,17 @@ The H200 supports **CUDA Compute Capability 9.0 (Hopper)**:
 ```bash
 # Check compute capability
 nvidia-smi --query-gpu=compute_cap --format=csv,noheader
-# Output: 9.0
+# Output: 9.0 (one line per GPU; 4 lines on this server)
 ```
 
 ### Tensor Core Capabilities
 
-#### 4th Generation Tensor Cores
+#### 4th Generation Tensor Cores (per-SM throughput)
 
-| Data Type | Matrix Size | Peak Performance (per SM) |
-|-----------|-------------|---------------------------|
+The table below shows relative per-SM throughput by data type. These are **per-SM** figures; multiply by the SM count and clock for whole-GPU peaks (see the aggregate numbers below).
+
+| Data Type | Matrix Size | Relative Per-SM Throughput |
+|-----------|-------------|----------------------------|
 | **FP16** | 16×16×16 | 256 TOPS |
 | **BF16** | 16×16×16 | 256 TOPS |
 | **TF32** | 16×16×16 | 128 TOPS |
@@ -138,22 +159,34 @@ nvidia-smi --query-gpu=compute_cap --format=csv,noheader
 | **INT8** | 16×16×16 | 512 TOPS |
 | **INT4** | 16×16×16 | 1024 TOPS |
 
+#### Aggregate Tensor-Core Peaks (whole GPU)
+
+These are the headline numbers you should quote when comparing throughput:
+
+| Metric | Value |
+|--------|-------|
+| **BF16/FP16 dense (datasheet)** | ~989 TFLOP/s |
+| **BF16/FP16 with sparsity (datasheet)** | ~1,979 TFLOP/s |
+| **BF16 dense (measured on this server)** | ~836 TFLOP/s |
+
+> The empirical ~836 TFLOP/s is a realistic, sustained BF16 dense matmul number for these cards — somewhat below the datasheet peak, as is normal for real kernels. Use it when sizing expectations. Note that **134 TFLOPS is a CUDA-core (non-tensor) figure**, not the tensor-core throughput — don't quote it as the H200's headline FP16/BF16 number.
+
 #### Tensor Core Usage in Deep Learning
 
 ```python
 # PyTorch automatic mixed precision with H200
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 
 model = MyModel().cuda()
 optimizer = torch.optim.AdamW(model.parameters())
-scaler = GradScaler()
+scaler = GradScaler('cuda')
 
 for data, target in dataloader:
     optimizer.zero_grad()
     
     # Use autocast for forward pass
-    with autocast():
+    with autocast('cuda'):
         output = model(data)
         loss = criterion(output, target)
     
@@ -163,10 +196,12 @@ for data, target in dataloader:
     scaler.update()
 ```
 
-### CUDA Cores Performance
+### CUDA Cores Performance (non-tensor)
+
+These are the **CUDA-core** (non-tensor) rates. Do not confuse them with the tensor-core peaks above — for deep learning you almost always want the tensor cores.
 
 - **Single Precision (FP32)**: 67 TFLOPS
-- **Half Precision (FP16)**: 134 TFLOPS
+- **Half Precision (FP16, CUDA cores)**: ~67 TFLOPS (Hopper non-tensor FP16 runs at the same rate as FP32)
 - **Double Precision (FP64)**: 34 TFLOPS
 
 ## Performance Characteristics
@@ -214,8 +249,8 @@ def gemm_performance_test():
     sizes = [1024, 2048, 4096, 8192, 16384]
     
     for size in sizes:
-        a = torch.randn(size, size, device=device, dtype=torch.float16)
-        b = torch.randn(size, size, device=device, dtype=torch.float16)
+        a = torch.randn(size, size, device=device, dtype=torch.bfloat16)
+        b = torch.randn(size, size, device=device, dtype=torch.bfloat16)
         
         # Warmup
         for _ in range(10):
@@ -235,6 +270,7 @@ def gemm_performance_test():
         tflops = ops / elapsed / 1e12
         
         print(f"Matrix size {size}x{size}: {tflops:.2f} TFLOPS")
+        # Large sizes should approach ~836 TFLOP/s (BF16 dense) on these cards
 
 gemm_performance_test()
 ```
@@ -245,8 +281,8 @@ gemm_performance_test()
 
 1. **Maximize Memory Utilization**:
    ```python
-   # Use all available memory effectively
-   batch_size = calculate_max_batch_size(model, input_size, memory_limit=130)  # Leave 11GB buffer
+   # Use most of one card's ~141 GB, leaving headroom for fragmentation/activations
+   batch_size = calculate_max_batch_size(model, input_size, memory_limit=130)  # ~11 GB buffer
    ```
 
 2. **Memory-Efficient Training**:
@@ -269,10 +305,7 @@ gemm_performance_test()
 
 1. **Use Tensor Cores**:
    ```python
-   # Enable automatic mixed precision
-   model = model.half()  # FP16 model
-   
-   # Or use autocast
+   # Enable automatic mixed precision (preferred over .half())
    with torch.autocast('cuda'):
        output = model(input)
    ```
@@ -289,10 +322,12 @@ gemm_performance_test()
 
 ```python
 # Optimized data loading for H200
+# The host has 256 logical CPUs, so num_workers can be generous;
+# pick a value that suits your per-job CPU share, not the whole machine.
 dataloader = torch.utils.data.DataLoader(
     dataset,
     batch_size=batch_size,
-    num_workers=8,  # Match CPU cores
+    num_workers=8,  # Tune up if you have spare CPU; the host has 256 logical cores
     pin_memory=True,  # Faster GPU transfer
     persistent_workers=True,  # Reduce worker restart overhead
     prefetch_factor=2,  # Prefetch batches
@@ -303,23 +338,27 @@ dataloader = torch.utils.data.DataLoader(
 
 ### Performance Comparison
 
-| GPU Model | Memory | Memory BW | FP16 TFLOPS | Architecture |
-|-----------|--------|-----------|-------------|--------------|
-| **H200 SXM** | **141 GB** | **4,800 GB/s** | **134 TFLOPS** | **Hopper** |
-| H100 SXM | 80 GB | 3,350 GB/s | 126 TFLOPS | Hopper |
-| A100 SXM | 80 GB | 2,039 GB/s | 77 TFLOPS | Ampere |
-| V100 SXM | 32 GB | 900 GB/s | 31 TFLOPS | Volta |
-| RTX 4090 | 24 GB | 1,008 GB/s | 42 TFLOPS | Ada Lovelace |
+| GPU Model | Memory | Memory BW | FP16 Tensor TFLOPS (dense) | Architecture |
+|-----------|--------|-----------|----------------------------|--------------|
+| **H200 NVL** | **~141 GB** | **4,800 GB/s** | **~836 (measured) / ~989 (datasheet)** | **Hopper** |
+| H100 SXM | 80 GB | 3,350 GB/s | ~989 | Hopper |
+| A100 SXM | 80 GB | 2,039 GB/s | ~312 | Ampere |
+| V100 SXM | 32 GB | 900 GB/s | ~125 | Volta |
+| RTX 4090 | 24 GB | 1,008 GB/s | ~165 | Ada Lovelace |
+
+> **Footnote:** The H200 and H100 share the same Hopper compute die, so their FP16/BF16 tensor-core throughput is essentially the same (~989 TFLOP/s dense). The H200's real advantage over the H100 is **memory** (~141 GB vs 80 GB) and **bandwidth** (4.8 vs 3.35 TB/s), not raw FP16 throughput. (FP16/BF16 dense peaks shown above; add sparsity for roughly 2× on Hopper/Ampere.)
 
 ### Memory Capacity Advantages
 
 ```python
-# Models that benefit from H200's large memory:
+# Models that benefit from H200's large memory.
+# Sizes are approximate fp16 weight footprints; TRAINING needs much more
+# (optimizer state + activations), so treat these as inference/loading guides.
 models_by_memory = {
-    "GPT-3 175B": "350+ GB",  # Needs model parallelism on other GPUs
-    "LLaMA 65B": "130 GB",    # Fits on single H200!
-    "Stable Diffusion XL": "12 GB",  # Much headroom for batch size
-    "BERT Large": "1.3 GB",   # Can run huge batch sizes
+    "GPT-3 175B": "~350 GB",          # Needs multi-GPU model parallelism (use all 4 cards)
+    "LLaMA 65B": "~130 GB fp16",      # Tight on one ~141 GB card for inference; no room to train
+    "Stable Diffusion XL": "~12 GB",  # Much headroom for batch size
+    "BERT Large": "~1.3 GB",          # Can run huge batch sizes
 }
 ```
 
@@ -329,11 +368,17 @@ models_by_memory = {
 
 1. **Large Language Models**:
    ```python
-   # Train/finetune models up to ~65B parameters on single GPU
+   # A 70B model in fp16 is ~140 GB of weights ALONE, which does not leave
+   # room on one ~141 GB card for activations/optimizer state. For ~70B:
+   #   - inference: shard across multiple cards, or use 4-bit/8-bit quantization
+   #   - training/finetuning: multi-GPU (this server has 4 cards) and/or quantization+offload
+   from transformers import AutoModelForCausalLM
+
+   # Multi-GPU inference example (shards across all 4 cards):
    model = AutoModelForCausalLM.from_pretrained(
        "meta-llama/Llama-2-70b-hf",
        torch_dtype=torch.float16,
-       device_map="auto"
+       device_map="auto",  # spreads layers across GPUs 0,1,2,3
    )
    ```
 
@@ -346,8 +391,9 @@ models_by_memory = {
 
 3. **Scientific Computing**:
    ```python
-   # Large-scale numerical simulations
-   simulation_grid = torch.zeros(8192, 8192, 8192, device='cuda')  # 2TB+ data
+   # Large-scale numerical simulations (size grids to fit one card's ~141 GB,
+   # or shard across the 4 GPUs for bigger problems)
+   simulation_grid = torch.zeros(4096, 4096, 1024, device='cuda')
    ```
 
 4. **Multi-Modal Models**:
@@ -366,18 +412,20 @@ models_by_memory = {
 #### Large Language Models
 ```python
 # Memory-efficient LLM training
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, TrainingArguments
 from torch.optim import AdamW
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype=torch.float16,
-    gradient_checkpointing=True,
-    use_cache=False  # Save memory during training
+    use_cache=False,  # Save memory during training
 )
+# Enable gradient checkpointing on the model (not a from_pretrained kwarg):
+model.gradient_checkpointing_enable()
+# (Equivalently, TrainingArguments(gradient_checkpointing=True).)
 
-# Use DeepSpeed ZeRO for even larger models
+# Use DeepSpeed ZeRO and/or multiple GPUs for even larger models
 from deepspeed import initialize
 model_engine, optimizer, _, _ = initialize(
     model=model,
@@ -399,7 +447,7 @@ def create_optimized_dataloader(dataset, batch_size=256):
     )
 
 # Mixed precision training for CNNs
-with autocast():
+with autocast('cuda'):
     output = model(images)
     loss = criterion(output, labels)
 
@@ -423,16 +471,16 @@ def scientific_simulation():
 ```python
 # Monitor H200 utilization
 import torch
-import nvidia_ml_py3 as nvml
+import pynvml as nvml
 
-def monitor_gpu_usage():
+def monitor_gpu_usage(index=0):
     nvml.nvmlInit()
-    handle = nvml.nvmlDeviceGetHandleByIndex(0)
+    handle = nvml.nvmlDeviceGetHandleByIndex(index)  # 0..3 on this server
     
     # Memory usage
     mem_info = nvml.nvmlDeviceGetMemoryInfo(handle)
-    memory_used = mem_info.used / 1024**3  # GB
-    memory_total = mem_info.total / 1024**3  # GB
+    memory_used = mem_info.used / 1024**3  # GiB
+    memory_total = mem_info.total / 1024**3  # GiB
     
     # Utilization
     util = nvml.nvmlDeviceGetUtilizationRates(handle)
@@ -442,7 +490,7 @@ def monitor_gpu_usage():
     # Temperature
     temp = nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
     
-    print(f"Memory: {memory_used:.1f}/{memory_total:.1f} GB ({memory_used/memory_total*100:.1f}%)")
+    print(f"Memory: {memory_used:.1f}/{memory_total:.1f} GiB ({memory_used/memory_total*100:.1f}%)")
     print(f"GPU Utilization: {gpu_util}%")
     print(f"Memory Utilization: {mem_util}%")
     print(f"Temperature: {temp}°C")
