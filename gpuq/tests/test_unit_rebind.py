@@ -41,7 +41,7 @@ def _run_rebind(us, running, procs, monkeypatch, *, audit_cfg=None,
             {"owner": owner, "kind": kind, "sample": sample}) or True)
     killed = []
     monkeypatch.setattr(
-        us, "enforce_kill_pgid", lambda pgid: (killed.append(pgid) or kill_ok))
+        us, "enforce_kill_pgid", lambda pgid, **kw: (killed.append(pgid) or kill_ok))
     cfg = dict(audit_cfg or {})
     breaches = us.check_rebind(running, cfg, _args(enforce), {"audit": cfg}, now=now)
     state = (json.loads(us.REBIND_STATE_FILE.read_text())

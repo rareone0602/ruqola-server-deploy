@@ -1,4 +1,4 @@
-"""Tests for `gpuq config` (writer + --show)."""
+"""Tests for `gpuq config` (read-only default, `init` writer)."""
 import json
 import subprocess
 import sys
@@ -15,30 +15,42 @@ def run(args, env):
     )
 
 
-def test_config_writes_default_when_missing(gpuq_env, tmp_path):
+def test_config_init_writes_default_when_missing(gpuq_env, tmp_path):
+    cfg = tmp_path / "fresh_config.json"
+    env = dict(gpuq_env)
+    env["GPUQ_CONFIG_FILE"] = str(cfg)
+    r = run(["config", "init"], env)
+    assert r.returncode == 0, r.stderr
+    assert cfg.exists()
+    data = json.loads(cfg.read_text())
+    assert "max_job_time_hours" in data
+    assert "default_min_free_gb" in data
+    assert "quotas" in data
+    assert "audit" in data
+
+
+def test_bare_config_is_read_only(gpuq_env, tmp_path):
     cfg = tmp_path / "fresh_config.json"
     env = dict(gpuq_env)
     env["GPUQ_CONFIG_FILE"] = str(cfg)
     r = run(["config"], env)
     assert r.returncode == 0, r.stderr
-    assert cfg.exists()
-    data = json.loads(cfg.read_text())
-    assert "max_job_time_hours" in data
-    assert "quotas" in data
-    assert "audit" in data
+    assert not cfg.exists()          # bare `config` never writes
+    assert "Config file:" in r.stdout
+    assert "config init" in r.stdout + r.stderr  # hints at the writer
 
 
-def test_config_refuses_to_clobber(gpuq_env):
+def test_config_init_refuses_to_clobber(gpuq_env):
     # gpuq_env's config file already exists from the fixture.
-    r = run(["config"], gpuq_env)
+    r = run(["config", "init"], gpuq_env)
     assert r.returncode != 0
     assert "already exists" in r.stderr
 
 
-def test_config_force_overwrites(gpuq_env, tmp_path):
+def test_config_init_force_overwrites(gpuq_env, tmp_path):
     cfg = Path(gpuq_env["GPUQ_CONFIG_FILE"])
     cfg.write_text(json.dumps({"old": "data"}))
-    r = run(["config", "--force"], gpuq_env)
+    r = run(["config", "init", "--force"], gpuq_env)
     assert r.returncode == 0, r.stderr
     data = json.loads(cfg.read_text())
     assert "max_job_time_hours" in data

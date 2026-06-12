@@ -9,11 +9,12 @@ Comprehensive guide to using the Ruqola server's custom GPU queue management sys
 3. [Job Submission](#job-submission)
 4. [Choosing Which GPU](#choosing-which-gpu)
 5. [Monitoring and Management](#monitoring-and-management)
-6. [GPU-Hour Quotas](#gpu-hour-quotas)
-7. [Advanced Usage](#advanced-usage)
-8. [Best Practices](#best-practices)
-9. [Common Workflows](#common-workflows)
-10. [Troubleshooting](#troubleshooting)
+6. [Job History](#job-history)
+7. [GPU-Hour Quotas](#gpu-hour-quotas)
+8. [Advanced Usage](#advanced-usage)
+9. [Best Practices](#best-practices)
+10. [Common Workflows](#common-workflows)
+11. [Troubleshooting](#troubleshooting)
 
 ## Overview
 
@@ -25,7 +26,8 @@ Our custom GPU queue system (`gpuq`) coordinates fair access to the server's 4 H
 - **Ownership policy** - You may stack more jobs on GPUs you already hold; GPUs held by *other* users are off-limits until they free up
 - **Self-supervising time limits** - Each job's own `gpuq submit` process kills it when the time limit is reached
 - **Usage monitoring** - `gpuq status` shows who is using what, and `gpuq audit` (run on cron) reports resource hogs and policy breaches
-- **Per-user quotas** - Rolling 7-day GPU-hour budgets keep one user from monopolizing the box over time
+- **Job ledger** - Every job is logged; `gpuq history` shows how your past jobs ended and what they cost, `gpuq quota` shows your rolling 7-day GPU-hours
+- **Per-user quotas** - Rolling 7-day GPU-hour budgets keep one user from monopolizing the box over time (not yet enforced — usage is being recorded to set fair budgets)
 - **Opt-in notifications** - Email alerts for job completion and policy issues
 
 > **gpuq is daemonless.** There is no background service. Each `gpuq submit` runs
@@ -59,8 +61,17 @@ gpuq submit -g 2 -m 40 -t 12 -- python large_model.py
 # Check your jobs
 gpuq status | grep "$USER"
 
-# Kill one of your jobs (positional job id)
+# Your recent jobs: runtime, GPU-hours, exit code, how they ended
+gpuq history
+
+# Your rolling 7-day GPU-hour usage (vs budget, once quotas are set)
+gpuq quota
+
+# Kill a running job — or cancel a queued one — by id
 gpuq kill 12345
+
+# Stop/cancel everything of yours on this host
+gpuq kill --mine
 ```
 
 > **Pass your command after `--`.** `gpuq` runs the command **directly, with no
@@ -142,7 +153,10 @@ indices, use `--devices` instead.
 `-m/--memory GB` is the **minimum free VRAM a candidate GPU must have to be
 chosen** — it is an admission *filter*, not a cap or a reservation. Your job is
 **not** held to that number; it can use as much VRAM as is physically on the card.
-The default comes from the config (`max_memory_per_gpu_gb`, currently 70).
+The default comes from the config (`default_min_free_gb`, 16 in the current
+template; configs that predate that key fall back to `max_memory_per_gpu_gb`).
+If a bare submit is rejected for "no free GPU", the error tells you the filter
+that was applied and reminds you to pass a smaller `-m` if your job needs less.
 
 ```bash
 # Only pick a GPU that currently has >= 60 GB free
@@ -159,7 +173,10 @@ gpuq submit -m 20 -- python small_model.py
 
 `-t/--time HOURS` sets how long the job may run before `gpuq` kills it. The
 default is 24h (from the config); it is a **default, not a hard maximum** — you
-may request more.
+may request more. It must be **greater than zero** (there is no unlimited
+mode). When the limit fires, gpuq prints a `time limit reached` notice to your
+terminal before terminating the job, so a timeout is never confused with a
+crash.
 
 ```bash
 # Short experiment (1 hour)
@@ -173,10 +190,13 @@ gpuq submit -t 48 -- python long_train.py
 ```
 
 > Because `gpuq` is daemonless, the time limit is enforced by the **foreground
-> `gpuq submit` process itself** (a timer inside it). If that process is killed
-> (e.g. your SSH session drops), the timer dies with it. Run long jobs under
-> `tmux`/`screen`, or with [user-linger](#keeping-jobs-alive-after-logout)
-> enabled, so the supervising process stays alive.
+> `gpuq submit` process itself** (a timer inside it). Closing your terminal
+> sends SIGHUP, which gpuq **forwards to the job** — so an SSH drop normally
+> kills the job along with the timer. Run long jobs under `tmux`/`screen`, or
+> with [user-linger](#keeping-jobs-alive-after-logout) enabled, so the
+> supervising process stays alive. (If a supervisor dies anyway — e.g.
+> SIGKILL — the job's GPU-hours are still recorded to the ledger as a `lost`
+> record when the dead entry is reaped.)
 
 ### Command Examples
 
@@ -287,8 +307,11 @@ watch -n 2 'nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,me
 ### Job Output (no per-job log files)
 
 `gpuq` runs your job in the foreground and **inherits your terminal's
-stdin/stdout/stderr** — it does **not** write per-job log files anywhere. To keep
-the output, redirect it yourself, or run inside `tmux`/`screen`:
+stdin/stdout/stderr** — it does **not** write per-job log files anywhere. When
+the job ends, gpuq prints a one-line summary to stderr (`job <id> completed:
+ran H:MM:SS on GPU(s) ..., N GPU-hours recorded (exit 0)`), and the same facts
+land in the ledger (`gpuq history`). To keep the job's own output, redirect it
+yourself, or run inside `tmux`/`screen`:
 
 ```bash
 # Tee output to a file while still seeing it
@@ -310,26 +333,74 @@ gpuq kill 12345
 # The same, as a flag
 gpuq kill --job-id 12345
 
-# Kill all of YOUR running jobs (parse the "Job <id> by <user>" lines)
-gpuq status | awk -v me="$USER" '/^  Job/ && $4==me {print $2}' | xargs -r -n1 gpuq kill
+# Cancel one of YOUR queued jobs from any terminal — same command.
+# (The waiting submit is signalled and removes itself from the queue.)
+gpuq kill 67890
+
+# Several ids at once
+gpuq kill 12345 67890
+
+# Stop ALL of your running jobs and cancel all your queued ones
+gpuq kill --mine
 
 # Check exit status of a foreground job after it finishes
-echo $?   # 0 = success
+echo $?   # 0 = success; 128+N = died by signal N (143 = SIGTERM, e.g. timeout)
 ```
 
-> You can only kill your **own** jobs; `gpuq kill` refuses someone else's. The
-> running-job lines are formatted `  Job <id> by <user> ...`, so the job id is the
-> **second** field — `awk '{print $1}'` would print the literal word `Job`, not an
-> id.
+> You can only kill your **own** jobs; `gpuq kill` refuses someone else's. A
+> job killed by signal (including a `-t` timeout) exits with the shell
+> convention `128 + signal` — a timed-out job typically surfaces as `143`.
+
+## Job History
+
+Every job leaves a record in a shared ledger; `gpuq history` reads it back:
+
+```bash
+gpuq history              # your last 20 jobs, oldest first
+gpuq history -n 50        # more of them
+gpuq history --all        # everyone's jobs (adds a USER column)
+gpuq history --user bob   # one specific user
+gpuq history --events     # also show cancelled/rejected submits
+gpuq history --json       # raw records, one JSON object per line
+```
+
+Each row shows when the job ended, how long it queued (WAIT) and ran
+(RUNTIME), the GPUs it held, the **GPU-hours charged**, the exit code, and the
+RESULT — one of:
+
+- `completed` — exit code 0
+- `failed` — non-zero exit
+- `timed_out` — killed at its `-t` limit
+- `killed` — died by signal (e.g. `gpuq kill`, Ctrl-C)
+- `lost*` — the supervising process died (e.g. SSH drop without tmux and a
+  later SIGKILL); the job was charged up to the moment it was reaped, capped
+  at its time limit
+
+So "did my job finish overnight? when? why did it stop?" is one command — no
+more digging through redirected logs to find out *whether* something ran.
 
 ## GPU-Hour Quotas
 
 `gpuq` enforces a **rolling 7-day GPU-hour budget** per user (set by the admin in
-the config). A budget of `0` or missing means **unlimited** (the default).
-Charging is by **actual runtime × GPUs held**, recorded when each job ends.
+the config). A budget of `0` or missing means **unlimited** — which is the
+**current state**: quotas are not enforced yet, while usage data is collected
+to set fair budgets. Charging is by **actual runtime × GPUs held**, recorded
+when each job ends (jobs straddling the 7-day cutoff are only charged for the
+in-window portion, and running jobs count at their current elapsed time).
 
-When a `gpuq submit` would push you over budget, the job is **not rejected** —
-instead it is **deprioritized**:
+Check where you stand at any time:
+
+```bash
+gpuq quota          # your usage: finished + running, budget, headroom
+gpuq quota --all    # one row per user + host capacity utilisation
+```
+
+While budgets are unset, `gpuq quota` reports your usage with an explicit
+"quotas are not enforced yet" note, and the `gpuq status` footer shows your
+7-day total after every status check.
+
+When budgets are active and a `gpuq submit` would push you over, the job is
+**not rejected** — instead it is **deprioritized**:
 
 1. Marked low-priority and forced into the queue (a warning is printed).
 2. You are emailed once (if notifications are enabled and your account has an
@@ -338,8 +409,9 @@ instead it is **deprioritized**:
    waiting on the same host.
 
 A solo over-quota submit still runs eventually (after its first poll delay); a
-contended one waits until the normal-priority queue clears. Check the admin's
-quota policy with `gpuq config --show`.
+contended one waits until the normal-priority queue clears. Pinning GPUs with
+`--devices` does **not** skip the quota gate — it chooses *which* card you
+get, not *whether* you wait like everyone else.
 
 ## Advanced Usage
 
@@ -453,7 +525,8 @@ be enforced and for output to be captured. Options:
    - Long training: 12-48 hours
 
 3. **Mind your quota**: GPU-hours are charged as runtime × GPUs; check
-   `gpuq config --show` and avoid holding GPUs idle.
+   `gpuq quota` (and `gpuq history` for what past jobs cost) and avoid holding
+   GPUs idle.
 
 4. **Monitor resource usage**:
    ```bash
@@ -548,6 +621,12 @@ for lr in 0.001 0.01 0.1; do
          -- python train.py --lr $lr --batch-size $bs"
   done
 done
+
+# Abort the whole sweep (running + queued) in one go:
+gpuq kill --mine
+
+# Afterwards, compare what each run cost:
+gpuq history -n 20
 ```
 
 ### Model Inference
@@ -586,10 +665,14 @@ gpuq status
 # 1. No selectable GPU right now — all are busy or held by other users.
 #    Add --queue to wait instead of being rejected.
 # 2. Your -m/--memory filter is higher than any card's current free VRAM.
-#    Lower it, or wait for a card to free up.
+#    Lower it, or wait for a card to free up. (With no -m, the config default
+#    applies — the rejection message tells you the number it used.)
 # 3. --devices pinned a GPU held by someone else (rejected immediately
 #    unless you also pass --queue).
-# 4. You are over your GPU-hour quota — the job is deprioritized, not rejected.
+# 4. The request fails validation: -t must be > 0, -g must fit the host's
+#    GPU count, --devices indices must exist, and -g must match --devices.
+#    These are rejected with a specific message before anything is queued.
+# 5. You are over your GPU-hour quota — the job is deprioritized, not rejected.
 
 # Debugging smoke test
 gpuq submit -g 1 -t 1 -- echo "Test job"
@@ -598,15 +681,21 @@ gpuq submit -g 1 -t 1 -- echo "Test job"
 #### Job Killed Unexpectedly
 
 ```bash
+# First: ask gpuq how the job ended (RESULT column + exit code)
+gpuq history
+
 # gpuq has no per-job log files — check the output you redirected yourself
 tail -100 train.err
 
-# Common causes:
-# 1. Out of memory — reduce batch size or model size
-# 2. Time limit reached — gpuq killed it at --time; request more time
-# 3. The supervising `gpuq submit` process died (SSH dropped, no tmux/linger),
-#    so the job was orphaned; later `gpuq audit` may clean it up
-# 4. Code error — inspect your redirected stderr
+# What the RESULT tells you:
+# - timed_out: gpuq killed it at --time (it also printed a "time limit
+#   reached" notice to the submitting terminal); request more time with -t
+# - failed: your code exited non-zero — inspect your redirected stderr (OOM,
+#   exceptions, ...)
+# - killed: it died by signal (gpuq kill, Ctrl-C, or a closed terminal whose
+#   SIGHUP was forwarded to the job — use tmux/screen next time)
+# - lost*: the supervising gpuq process itself died (e.g. SIGKILL); the job's
+#   hours were still charged when the dead entry was reaped
 ```
 
 #### GPU Out of Memory
@@ -670,11 +759,13 @@ python -m memory_profiler train.py
 ### Getting Help
 
 1. **Check system status**: `gpuq status`
-2. **Inspect your own redirected output** (there are no per-job log files)
-3. **Test with simple commands**: `gpuq submit -- nvidia-smi`
-4. **See active settings**: `gpuq config --show`
-5. **Contact the administrator** with:
-   - Job ID
+2. **Check how the job ended**: `gpuq history` (RESULT + exit code), and
+   `gpuq quota` for your usage
+3. **Inspect your own redirected output** (there are no per-job log files)
+4. **Test with simple commands**: `gpuq submit -- nvidia-smi`
+5. **See active settings**: `gpuq config`
+6. **Contact the administrator** with:
+   - Job ID (from `gpuq history` — it's the same id announced at submit)
    - Command used
    - Error output you captured
    - Expected vs actual behavior

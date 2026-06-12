@@ -12,7 +12,7 @@
 #   Shared master:  /var/lib/gpu_queue/gpuq.py  (gpuqueue-writable)
 #   User target:    ~/.local/bin/gpuq
 
-set -uo pipefail
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_REPO="$REPO_ROOT/gpuq/userspace.py"
@@ -43,8 +43,15 @@ if [[ $PUBLISH_SHARED -eq 1 ]]; then
         echo "Cannot read repo source $SCRIPT_REPO" >&2
         exit 1
     fi
-    cp "$SCRIPT_REPO" "$SCRIPT_SHARED"
-    chmod 0755 "$SCRIPT_SHARED" 2>/dev/null || true
+    # Atomic publish: a user invoking the symlinked master mid-copy must never
+    # execute a truncated script. Group-writable so any gpuqueue member can
+    # republish later.
+    TMP="$(mktemp "${SCRIPT_SHARED}.XXXXXX")"
+    trap 'rm -f -- "$TMP"' EXIT
+    cp "$SCRIPT_REPO" "$TMP"
+    chmod 0775 "$TMP"
+    mv -f -- "$TMP" "$SCRIPT_SHARED"
+    trap - EXIT
     echo "Published $SCRIPT_REPO -> $SCRIPT_SHARED"
 fi
 

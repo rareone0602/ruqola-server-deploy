@@ -320,8 +320,10 @@ gpuq status                     # check queue and GPU ownership
 gpuq submit -- python train.py  # canonical form; --gpus defaults to 1
 gpuq submit -g 1 -- python train.py        # request 1 GPU explicitly
 gpuq submit --command "python train.py"    # equivalent --command form
-gpuq kill 12345                 # kill one of your jobs by id
-gpuq kill --job-id 12345        # same, using the flag form
+gpuq history                    # your recent jobs (runtime, exit code, end reason)
+gpuq quota                      # your rolling 7-day GPU-hours vs budget
+gpuq kill 12345                 # stop a running job or cancel a queued one (ids can be listed)
+gpuq kill --mine                # stop all your running jobs, cancel all your queued ones
 ```
 
 Your job runs in the **foreground** of the terminal — gpuq has no daemon and
@@ -379,11 +381,12 @@ pip show package-name           # show package info
 2. **Specify resource requirements**: Don't request more GPUs than you need
 3. **You own the GPUs gpuq allocates to you**: you can stack additional jobs onto
    cards you already hold, but cards held by other users are off-limits until they
-   free them. There is also a rolling weekly (7-day) GPU-hour quota — see the
-   [GPU Queue Guide](gpu-queue-guide.md).
+   free them. There is also a rolling weekly (7-day) GPU-hour quota (check yours
+   with `gpuq quota`) — see the [GPU Queue Guide](gpu-queue-guide.md).
 4. **Keep long jobs in `screen`/`tmux`**: gpuq jobs run in the foreground, so a
    multiplexer keeps them alive if you disconnect.
-5. **Clean up finished jobs**: Kill completed or failed jobs you no longer need.
+5. **Clean up abandoned jobs**: `gpuq kill --mine` stops all your running jobs
+   and cancels all your queued ones.
 
 ## Quick Reference Card
 

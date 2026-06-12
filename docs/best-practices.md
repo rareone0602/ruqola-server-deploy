@@ -111,7 +111,11 @@ print(f"Estimated memory: {memory_needed:.1f} GB")
 - **Let gpuq wait for you instead of polling**: `gpuq submit --queue ...` enqueues
   your job and starts it as soon as a slot (or your pinned `--devices`) frees up
 - **Monitor your jobs**: `watch -n 10 gpuq status`
-- **Kill finished/failed jobs**: `gpuq kill 12345` (or `gpuq kill --job-id 12345`)
+- **Review finished jobs and usage**: `gpuq history` (runtime, GPU-hours, exit
+  code, end reason) and `gpuq quota` (your rolling 7-day GPU-hours vs budget)
+- **Kill jobs you no longer need**: `gpuq kill 12345 67890` stops running jobs
+  and cancels queued ones (from any terminal); `gpuq kill --mine` stops all your
+  running jobs and cancels all your queued ones
 - **Use appropriate batch sizes**: Start small, increase gradually
 - **Clean up temporary files**: Remove large datasets after use
 - **Communicate with team**: Let others know about long-running jobs
@@ -416,15 +420,18 @@ model = jax.jit(model)                  # JAX
 **Common Causes & Solutions**:
 ```bash
 # 1. Time limit exceeded
-# gpuq enforces --time: at the deadline it SIGTERMs (then SIGKILLs) the job.
+# gpuq enforces --time: at the deadline it SIGTERMs (then SIGKILLs) the job
+# and prints a "time limit reached" notice in your terminal; `gpuq history`
+# shows the job as timed_out.
 # Solution: Request more time or optimize code
 gpuq submit --command "python train.py" --time 24
 
 # 2. You lost your terminal/SSH session
 # gpuq runs your job in the FOREGROUND of the terminal you submit from.
-# If that session dies, the job can die with it. Solution: use tmux/screen,
-# or run on a host where your user has lingering enabled (gpuq then launches
-# the job in a systemd --user scope that survives logout).
+# If that session dies, gpuq forwards the hangup (SIGHUP) to your job and the
+# job dies with it. Solution: use tmux/screen, or run on a host where your
+# user has lingering enabled (gpuq then launches the job in a systemd --user
+# scope that survives logout).
 tmux new -s train
 gpuq submit -- python train.py
 
@@ -440,6 +447,10 @@ watch -n 5 'free -h && nvidia-smi'
 # (a "rebind") or GPU processes not launched via gpuq, once past their grace
 # deadline. Always launch through `gpuq submit` and don't override the device
 # gpuq picked (don't reset CUDA_VISIBLE_DEVICES); pin a card with --devices.
+
+# In every case gpuq prints a one-line summary when the job ends; to see how
+# a past job ended (runtime, exit code, end reason):
+gpuq history
 ```
 
 ### Issue 4: Poor Multi-GPU Performance
@@ -708,7 +719,10 @@ top -o %MEM
 # Kill runaway processes (be careful!)
 kill -9 PID
 
-# Emergency: Kill all your processes
+# Stop all your gpuq jobs (running + queued)
+gpuq kill --mine
+
+# Emergency: Kill all your Python processes
 pkill -u $USER python
 ```
 
@@ -753,7 +767,7 @@ gc.collect()
 - Your username and job ID
 - Exact error messages
 - Commands that led to the issue
-- System state (output of `nvidia-smi`, `gpuq status`)
+- System state (output of `nvidia-smi`, `gpuq status`, `gpuq history`)
 - Any log file you redirected your job's output to
 
 ### Prevention Checklist

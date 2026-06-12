@@ -1,6 +1,7 @@
 {
   "max_job_time_hours": 24,
   "max_memory_per_gpu_gb": 70,
+  "default_min_free_gb": 16,
   "notification_email": {
     "enabled": false,
     "smtp_server": "smtp.gmail.com",

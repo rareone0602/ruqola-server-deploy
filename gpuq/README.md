@@ -1,7 +1,7 @@
 # Custom GPU Queue Management
 
 This subfolder contains the custom script implementing the GPU queuing and monitoring system set up on the Mjölnir server.
-The script is contained in `userspace.py` (deployed as `gpuq`). The older `gpu_queue.py` in this directory is the **retired legacy daemon**, kept only for reference — it is no longer what `gpuq` runs. Below instructions show how the script was set up on the server (and how it can be set up again, in case), as well as some basic usage examples and other useful information for GPU monitoring on the server.
+The script is contained in `userspace.py` (deployed as `gpuq`). The older `gpu_queue.py` is the **retired legacy daemon**, kept only in the development repo for reference — it is no longer what `gpuq` runs. Below instructions show how the script was set up on the server (and how it can be set up again, in case), as well as some basic usage examples and other useful information for GPU monitoring on the server.
 
 > **gpuq is daemonless.** Each `gpuq submit` runs your command in the **foreground**
 > in your own terminal; that process claims the GPU(s), sets
@@ -47,41 +47,59 @@ and do **not** use the legacy `gpu_queue.py`.
    ./install_user.sh --publish-shared
    ```
    On subsequent machines/users, once the shared master exists, a plain
-   `./install_user.sh` symlinks `~/.local/bin/gpuq` to it.
+   `./install_user.sh` symlinks `~/.local/bin/gpuq` to it. Other modes:
+   `--copy-shared` (per-user copy of the shared master instead of a symlink)
+   and `--copy-from-repo` (per-user copy straight from this repo).
 
 3. (Optional) Install `requests` if you want Slack notifications from `gpuq audit`:
    ```bash
    pip install requests  # for Slack notifications
    ```
 
-4. Create the configuration file. `gpuq config` writes the **canonical default**
-   template (the source of truth lives in `userspace.py`), but only if no config
-   exists yet — otherwise it refuses and tells you to use `--force`:
+> **Upgrading: replace EVERY deployed copy in one pass.** gpuq lives in three
+> places (system `/usr/local/bin/gpuq`, shared master
+> `/var/lib/gpu_queue/gpuq.py`, and each user's `~/.local/bin/gpuq`). Symlink-
+> mode users pick up a republished master automatically, but `--copy-shared` /
+> `--copy-from-repo` users keep private copies — chase those down. Old
+> binaries sharing `/var/lib/gpu_queue` with new ones are *mostly* compatible
+> (the ledger format tolerates both directions), but an old binary's reaper
+> will silently drop entries the new version deliberately keeps (orphaned
+> jobs whose workload is still on the GPU), losing their ledger hours — so
+> don't rely on the job-log accounting until every copy is current:
+> `sudo ./install_system.sh && ./install_user.sh --publish-shared`.
+
+4. Create the configuration file. `gpuq config init` writes the **canonical
+   default** template (the source of truth lives in `userspace.py`), but only if
+   no config exists yet — otherwise it refuses and tells you to use `--force`.
+   A bare `gpuq config` is **read-only**: it shows the loaded settings and paths
+   (safe for any user to run):
    ```bash
-   gpuq config            # writes the default config if none exists
-   gpuq config --show     # show the loaded config, paths, and host/user
-   gpuq config --force    # overwrite an existing config with the default
+   gpuq config            # show the loaded config, paths, and host/user
+   gpuq config init       # (admin) write the default config if none exists
+   gpuq config init --force   # (admin) overwrite an existing config
    ```
    Always prefer the generated template over copying any on-disk sample by hand.
    `install_system.sh` already seeds this config the first time it runs.
 
 5. Edit the configuration file to enable notifications, quotas, and audit
-   thresholds. The full template `gpuq config` writes looks like this:
+   thresholds. The full template `gpuq config init` writes looks like this
+   (`username`/`password` are seeded empty — fill in the SMTP sender account):
    ```json
    {
      "max_job_time_hours": 24,
      "max_memory_per_gpu_gb": 70,
+     "default_min_free_gb": 16,
      "notification_email": {
        "enabled": false,
        "smtp_server": "smtp.gmail.com",
        "smtp_port": 587,
-       "username": "your-email@gmail.com",
-       "password": "your-app-password",
+       "username": "",
+       "password": "",
        "admin_email": "admin@yourlab.com"
      },
      "slack": {
        "enabled": false,
-       "webhook_url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+       "webhook_url": "",
        "channel": "#gpu-alerts"
      },
      "quotas": {
@@ -106,7 +124,11 @@ and do **not** use the legacy `gpu_queue.py`.
    }
    ```
    See the **GPU-hour quotas** and **Admin audits** sections lower in this file for
-   what the `quotas` and `audit` blocks do.
+   what the `quotas` and `audit` blocks do. `default_min_free_gb` is the `-m`
+   filter applied when a submit passes no `-m` (configs that predate this key
+   fall back to `max_memory_per_gpu_gb`). The webhook in the `slack` block posts
+   to whatever channel it was created for; the `channel` key is a human-readable
+   note, not something the code reads.
 
 > The userspace `gpuq` resolves a user's email from their account's **GECOS**
 > field (`getent passwd <user>`), not from a config map — so there is **no**
@@ -152,19 +174,36 @@ gpuq submit --notify "user@lab.com" -- python experiment.py
 gpuq submit -- python train.py > train.log 2>&1
 ```
 
+When the job ends, gpuq prints a one-line summary to stderr with the runtime,
+the GPUs used, the GPU-hours recorded to the ledger, and the exit code.
+
 ### Monitoring
 ```bash
-# Check current status (GPUs + running/queued jobs + live GPU processes)
+# Check current status (GPUs + who holds them + running/queued jobs +
+# live GPU processes + your own 7-day usage footer)
 gpuq status
 
 # Monitor in real-time
 watch -n 5 gpuq status
+
+# Your recent jobs from the ledger (runtime, GPU-hours, exit, end reason)
+gpuq history
+
+# Your rolling 7-day GPU-hours vs budget
+gpuq quota
 ```
 
 ### Advanced Usage
 ```bash
-# Kill one of your own jobs (positional job id, or --job-id)
+# Kill one of your own RUNNING jobs (positional job id, or --job-id)
 gpuq kill 12345
+
+# Cancel one of your QUEUED jobs from any terminal (same command)
+gpuq kill 67890
+
+# Several at once, or everything of yours on this host
+gpuq kill 12345 67890
+gpuq kill --mine
 
 # Submit interactive job (for Jupyter notebooks)
 gpuq submit -t 4 -- jupyter notebook --ip=0.0.0.0 --port=8888
@@ -205,8 +244,10 @@ gpuq submit -t 8 -- jupyter notebook --ip=0.0.0.0 --port="$PORT" --no-browser
 ### For Users
 1. **Always specify resource requirements** - don't hog more than you need
 2. **Use time limits** - helps others plan their work
-3. **Monitor your jobs** - check `gpuq status` regularly
+3. **Monitor your jobs** - check `gpuq status` regularly; `gpuq history` shows
+   how past jobs ended and what they cost in GPU-hours
 4. **Kill finished jobs** - if something hangs, use `gpuq kill <job-id>`
+   (works on queued jobs too; `gpuq kill --mine` clears everything of yours)
 
 ### For Admins
 1. **Monitor the Slack channel** - on the #gpu-alerts channel you'll get `gpuq audit` alerts about resource hogs, over-quota users, and untracked/rebound jobs
@@ -259,8 +300,11 @@ What `gpuq audit` enforces (scheduled from cron, see below):
   total (default 50 GB). Both thresholds are configurable.
 - **Flags over-quota users** — see "GPU-hour quotas".
 
-Base scheduling is **first-come, first-served**, with over-quota submissions
-deprioritized (see "GPU-hour quotas" below).
+Scheduling is **opportunistic**: a free slot goes to whichever submit asks for
+it first (waiters poll every 30s; the queue shown by `gpuq status` is
+informational, not a strict order). The one hard rule is that **over-quota
+submissions are deprioritized** and always yield to normal-priority waiters
+(see "GPU-hour quotas" below).
 
 ## Monitoring Commands
 
@@ -309,6 +353,40 @@ gpuq submit --devices 1,3 --queue -- python y.py # wait for exactly GPU 1 and 3
 `-m/--memory` is the **minimum free VRAM** a candidate GPU must have to be selected
 (an admission check at submit time) — it is **not** a hard cap or reservation the
 job is later held to; once the job runs it can use as much VRAM as the card has.
+When `-m` is omitted, the filter defaults to the config's `default_min_free_gb`
+(16 in the current template; older configs fall back to `max_memory_per_gpu_gb`).
+
+## The job ledger (`usage.jsonl`)
+
+Every job leaves a JSON line in `/var/lib/gpu_queue/usage.jsonl` — this is both
+the quota ledger and the job log that future budgets will be calibrated from.
+Record types (the `event` key; a missing `event` means `end`, which is how
+pre-ledger-v2 lines are absorbed):
+
+- **`end`** — a job finished. Carries the full job context: `command`, `name`,
+  `gpus_requested` vs the granted `gpus`, `devices` (when pinned), `memory_gb`
+  filter, `max_time_hours`, `priority`, `over_quota_at_submit`, `submitted_at` /
+  `started_at` / `ended_at`, `queue_wait_sec`, `elapsed_hours`, `gpu_hours`,
+  `exit_code`, and `end_reason` — one of `completed`, `failed`, `timed_out`,
+  `killed` (died by signal, e.g. `gpuq kill`), or `lost`.
+- **`end` with `end_reason: "lost"`, `synthetic: true`** — written by the
+  reaper when a job's supervising process AND its child both died without
+  reaching normal accounting (e.g. the supervisor was SIGKILLed). The job is
+  charged from its start to the reap, capped at its own time limit, so killed
+  supervisors cannot erase GPU-hours from the ledger.
+- **`cancelled`** — a queued submit that never ran (Ctrl-C, SIGTERM, killed
+  via `gpuq kill`, or its waiting process died). Uses `at`/`wait_sec`; never
+  quota-charged.
+- **`rejected`** — a submit refused outright (no free slot without `--queue`,
+  or pinned `--devices` unavailable). Records unmet demand — a user with low
+  usage but many rejections is starved, not idle.
+
+Users read the ledger with `gpuq history` (`--all`, `--user U`, `--events` to
+include cancelled/rejected, `--json` for scripting). The file is group-readable
+and append-only under the shared lock; old and new gpuq versions can write it
+concurrently (old readers skip what they don't know). If it ever grows
+unwieldy, rotate it manually to `usage-YYYY-MM.jsonl` in the same directory —
+all readers pick rotated files up automatically.
 
 ## GPU-hour quotas
 
@@ -324,8 +402,16 @@ in the config file:
 }
 ```
 
-A budget of `0` (or missing) means unlimited. Charging is by **actual runtime
-× GPUs held**, appended to `/var/lib/gpu_queue/usage.jsonl` at job end.
+A budget of `0` (or missing) means unlimited — which is the **current deployed
+state**: quotas are dormant while usage data is gathered, but everything below
+already works, and `gpuq quota` makes that explicit to users.
+
+Charging is by **actual runtime × GPUs held**, recorded in the ledger at job
+end. The rolling window is exact: a job straddling the 7-day cutoff is only
+charged for the in-window fraction, and running jobs count at their current
+elapsed time. Pinned (`--devices`) submits pass the same quota gate as the
+random picker — pinning chooses *which* card you get, not *whether* you skip
+the line.
 
 When a `gpuq submit` would push the user over budget, the job is **not
 rejected** — instead it is:
@@ -340,14 +426,51 @@ rejected** — instead it is:
 Solo over-quota submitters still run eventually (after their first poll
 delay); contended ones wait until the normal-priority queue clears.
 
+### Checking usage (`gpuq quota`)
+
+```bash
+gpuq quota             # your own window: finished + running + budget/headroom
+gpuq quota --all       # one row per user, plus host capacity utilisation
+gpuq quota --report    # weekly per-user stats for SETTING budgets (see below)
+```
+
+While budgets are unset, `gpuq quota` says so explicitly ("usage is recorded so
+budgets can be set from real data") instead of just "unlimited", and the
+`gpuq status` footer shows your own 7-day total after every status check.
+
+### Setting budgets from data (`gpuq quota --report`)
+
+After a few weeks of ledger data, `gpuq quota --report --weeks 8` prints, per
+user: active weeks, weekly GPU-hour p50/p95/max/mean, queue-wait p50/p95,
+timeout/lost percentages, and the share of hours via pinned `--devices` — plus
+a host row as % of capacity (4 GPUs × 168 h = 672 GPU-h/week). A practical
+recipe: set each user's budget near their **P95** weekly hours (normal weeks
+unaffected, outlier weeks deprioritized) and sanity-check that the sum of
+budgets stays within ~1.5× capacity. Then enable enforcement by editing
+`quotas.default_gpu_hours_per_week` / `quotas.users` in the config — no
+redeploy needed, the next submit picks it up.
+
 ## Admin audits (`gpuq audit`)
 
-The old systemd daemon's resource-hog alerts are replaced by a stateless
-`gpuq audit` subcommand. It reports:
+The old systemd daemon's resource-hog alerts are replaced by the cron-driven
+`gpuq audit` subcommand (no daemon; it keeps small per-offender state files,
+`untracked_state.json` / `rebind_state.json`, so offenders are not re-emailed
+every run). It reports:
 
 - users holding more GPUs than `audit.max_gpus_per_user`
-- users holding more memory (sum across their jobs) than `audit.max_total_memory_gb`
-- users whose 7-day GPU-hour usage exceeds their quota
+- users holding more "requested memory" than `audit.max_total_memory_gb`
+  (the sum of each job's `-m` filter × its GPUs — the request, not measured
+  VRAM; nvidia-smi truth is in the `gpuq status` process list)
+- users whose 7-day GPU-hour usage exceeds their quota — including users idle
+  at audit time (candidates come from running jobs, the config, AND the ledger)
+
+Each run also performs housekeeping: dead running/queued entries are reaped,
+and jobs whose supervisor and child both vanished get a synthetic `lost`
+ledger record so their GPU-hours are not silently dropped. If `nvidia-smi`
+itself fails (wedged driver), the untracked/rebind checks skip that run rather
+than mistaking the failure for "all processes gone" — offender deadlines are
+preserved. Before any `--enforce` kill, the target process group is re-checked
+against the recorded owner so a recycled pgid is never signalled.
 
 Exit code is `0` when clean, `1` when any breach is reported. Slack and email
 alerts use the existing `slack` / `notification_email` config blocks.
@@ -399,10 +522,12 @@ while a legitimate worker is not falsely flagged.
 **Activating cgroup tracking:** scoping turns on for a user only when they
 *linger* (`sudo loginctl enable-linger <user>`), which is also what keeps a job
 alive after the user logs out — so it never creates a scope that would die on
-logout. Until then, the job uses the process-group fallback (and survives logout
-by orphaning, as before). Enable linger for your GPU users to get robust
-subprocess tracking fleet-wide. `GPUQ_SCOPE=off` forces the fallback; `on` forces
-scoping regardless of linger.
+logout. Until then, the job uses the process-group fallback. Note that closing
+the submitting terminal sends SIGHUP, which gpuq **forwards to the job** —
+i.e. a job does *not* survive a closed terminal by orphaning; run under
+`tmux`/`screen` (or with linger) to keep jobs alive across disconnects. Enable
+linger for your GPU users to get robust subprocess tracking fleet-wide.
+`GPUQ_SCOPE=off` forces the fallback; `on` forces scoping regardless of linger.
 
 The lifecycle for each offending process group:
 
@@ -469,14 +594,18 @@ process needs root (run the `--enforce` form from root's crontab).
 ## Local development
 
 The userspace script (`gpuq/userspace.py`) is testable on any laptop without
-a real GPU, via three env vars:
+a real GPU, via these env vars:
 
-| Variable                        | Default                                | Purpose                          |
-| ------------------------------- | -------------------------------------- | -------------------------------- |
-| `GPUQ_QUEUE_DIR`                | `/var/lib/gpu_queue`                   | Shared coordination dir          |
-| `GPUQ_CONFIG_FILE`              | `/usr/local/bin/gpu_queue_config.json` | Admin config json                |
-| `GPUQ_NVSMI`                    | `nvidia-smi`                           | nvidia-smi binary path           |
-| `GPUQ_DEPRIORITIZED_POLL_SEC`   | `120`                                  | Poll cadence for deprioritized   |
+| Variable                        | Default                                | Purpose                                       |
+| ------------------------------- | -------------------------------------- | --------------------------------------------- |
+| `GPUQ_QUEUE_DIR`                | `/var/lib/gpu_queue`                   | Shared coordination dir                       |
+| `GPUQ_CONFIG_FILE`              | `/usr/local/bin/gpu_queue_config.json` | Admin config json                             |
+| `GPUQ_NVSMI`                    | `nvidia-smi`                           | nvidia-smi binary path                        |
+| `GPUQ_DEPRIORITIZED_POLL_SEC`   | `120`                                  | Poll cadence for deprioritized waiters        |
+| `GPUQ_SCOPE`                    | `auto`                                 | systemd-scope launch: `auto`/`on`/`off`       |
+
+(Each job also receives `GPUQ_JOB_ID` in its environment, and gpuq sets
+`CUDA_VISIBLE_DEVICES` to the allocated GPUs.)
 
 A fake `nvidia-smi` (`gpuq/tests/fake_nvidia_smi.py`) emits the same CSV as
 the real one from a JSON state file pointed to by `FAKE_NVSMI_STATE`:
@@ -500,7 +629,7 @@ pip install -r tests/requirements.txt
 pytest -q tests/
 ```
 
-112 tests; ~45s wall time. No GPU, no root, no network. (The untracked-job and
+148 tests; ~80s wall time. No GPU, no root, no network. (The untracked-job and
 rebind tests spawn a real same-user `sleep` to exercise the kill path, and skip
 if the test user is in the system allowlist, e.g. `root`.)
 
@@ -511,8 +640,10 @@ export GPUQ_QUEUE_DIR=$(mktemp -d)
 export GPUQ_NVSMI=$PWD/tests/fake_nvidia_smi.py
 export FAKE_NVSMI_STATE=$PWD/tests/states/two_idle_gpus.json
 export GPUQ_CONFIG_FILE=$GPUQ_QUEUE_DIR/config.json
-./userspace.py config            # writes default
+./userspace.py config init       # writes default
 ./userspace.py status            # shows two fake GPUs
 ./userspace.py submit -- /bin/true
+./userspace.py history           # the job's ledger record
+./userspace.py quota             # usage vs (unset) budget
 ./userspace.py audit
 ```

@@ -12,6 +12,9 @@ Quick reference for resolving common issues on the Ruqola server's H200 GPUs.
 # If system is unresponsive
 sudo reboot  # Last resort - contact admin first
 
+# Stop all YOUR gpuq jobs (running + queued)
+gpuq kill --mine
+
 # Kill your runaway Python jobs (scoped: does NOT touch your shell/SSH session)
 pkill -u $USER python
 # WARNING: a bare `pkill -u $USER` kills EVERY process you own, including your
@@ -112,10 +115,12 @@ dmesg | tail -50
 journalctl -f  # Real-time system logs
 ```
 
-You can also inspect the shared queue state to see what `gpuq` knows about running jobs:
+You can also ask `gpuq` what it knows about running and past jobs (gpuq prints a
+one-line summary when a job ends, and the ledger keeps it):
 
 ```bash
 gpuq status                            # who holds which GPU
+gpuq history                           # your past jobs: runtime, exit code, end reason
 cat /var/lib/gpu_queue/running.json    # raw running-jobs state
 ```
 
@@ -755,6 +760,9 @@ nvidia-smi
 
 echo "=== Queue Status ==="
 gpuq status
+
+echo "=== Recent jobs ==="
+gpuq history
 
 echo "=== Running-jobs state (shared queue dir) ==="
 cat /var/lib/gpu_queue/running.json 2>/dev/null || echo "No running.json found"

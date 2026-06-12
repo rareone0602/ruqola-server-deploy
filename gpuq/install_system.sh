@@ -97,12 +97,12 @@ fi
 if [[ -e "$CONFIG" ]]; then
     echo "Config $CONFIG present (left untouched)"
 else
-    GPUQ_CONFIG_FILE="$CONFIG" "$TARGET" config >/dev/null 2>&1 || true
+    GPUQ_CONFIG_FILE="$CONFIG" "$TARGET" config init >/dev/null 2>&1 || true
     if [[ -e "$CONFIG" ]]; then
         chmod 0644 "$CONFIG"
         echo "Wrote starter config $CONFIG (edit to enable email/Slack/audit)"
     else
-        echo "NOTE: could not seed $CONFIG; create it later with 'gpuq config'." >&2
+        echo "NOTE: could not seed $CONFIG; create it later with 'gpuq config init'." >&2
     fi
 fi
 

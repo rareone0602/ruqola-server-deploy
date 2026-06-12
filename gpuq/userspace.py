@@ -12,7 +12,11 @@ Design:
   - Foreground execution: each submit is its own executor; no daemon to run.
   - Owned-GPU allocation: a GPU you hold is yours to stack more jobs on; GPUs
     held by other users are off-limits until freed.
-  - First-come-first-serve, with per-user rolling 7-day GPU-hour quotas.
+  - Opportunistic scheduling: free slots go to whichever submit asks first
+    (waiters poll; the queue is informational). Low-priority (over-quota)
+    submits always yield to normal-priority waiters.
+  - Per-user rolling 7-day GPU-hour quotas; every job is logged to a usage
+    ledger (`gpuq history`, `gpuq quota`) so budgets can be set from data.
   - Opt-in notifications; a user's email is read from their account (GECOS).
   - Coordination is cooperative (/dev/nvidia* is world-accessible). `gpuq audit`
     detects resource hogs, over-quota users, and GPU jobs not launched through
@@ -30,6 +34,7 @@ import smtplib
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -66,6 +71,8 @@ GPU_OWN_MIN_FREE_GB = 2            # owned-GPU stacking still needs this much fr
 QUEUE_POLL_INTERVAL_SEC = 30
 KILL_GRACE_SEC = 10
 QUOTA_WINDOW_HOURS = 24 * 7        # rolling 7 days
+NVSMI_TIMEOUT_SEC = 15             # a wedged driver must not hang gpuq under the lock
+COMMAND_LOG_MAX_CHARS = 300        # command text stored per ledger record
 DEPRIORITIZED_POLL_INTERVAL_SEC = int(
     os.environ.get("GPUQ_DEPRIORITIZED_POLL_SEC", "120")
 )
@@ -118,14 +125,23 @@ def _load(path: Path):
 
 
 def _save(path: Path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
+    # Unique tmp name + group-rw mode from creation: a writer killed mid-save
+    # must never leave a fixed-name tmp file another user cannot reopen.
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
     try:
-        os.chmod(tmp, 0o664)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+        try:
+            os.fchmod(fd, 0o664)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_running():
@@ -150,7 +166,16 @@ def load_config():
     try:
         with open(CONFIG_FILE) as f:
             return json.load(f)
-    except (PermissionError, json.JSONDecodeError):
+    except PermissionError:
+        # Falling back to built-in defaults here would silently disable
+        # quotas/limits for this user — make the misconfiguration visible.
+        print(f"warning: cannot read {CONFIG_FILE} (permission denied); "
+              "using built-in defaults. Ask the admin to make it readable "
+              "(e.g. root:gpuqueue 640).", file=sys.stderr)
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"warning: invalid JSON in {CONFIG_FILE}: {e}; "
+              "using built-in defaults.", file=sys.stderr)
         return {}
 
 
@@ -158,19 +183,25 @@ def load_config():
 # nvidia-smi wrappers (read-only)
 # ---------------------------------------------------------------------------
 def _nvsmi(query_kind, fields):
+    """Run one nvidia-smi query. Returns its stdout, or None on failure
+    (missing binary, error exit, or a wedged driver hitting the timeout).
+    Callers that must tell 'nvidia-smi failed' from 'nothing running' check
+    for None; the parsers below treat None like empty output."""
     try:
         r = subprocess.run(
             [NVSMI_BIN, f"--query-{query_kind}={fields}",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, check=True,
+            timeout=NVSMI_TIMEOUT_SEC,
         )
         return r.stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+    except (subprocess.CalledProcessError, FileNotFoundError,
+            subprocess.TimeoutExpired):
+        return None
 
 
 def get_gpu_info():
-    out = _nvsmi("gpu", "index,name,memory.used,memory.total,utilization.gpu")
+    out = _nvsmi("gpu", "index,name,memory.used,memory.total,utilization.gpu") or ""
     gpus = []
     for line in out.strip().split("\n"):
         if not line:
@@ -197,7 +228,11 @@ def get_gpu_info():
 
 
 def get_gpu_processes():
+    """GPU compute processes, or None if nvidia-smi itself failed (callers in
+    the audit path must not mistake a driver blip for 'all processes gone')."""
     out = _nvsmi("compute-apps", "pid,process_name,gpu_uuid,used_memory")
+    if out is None:
+        return None
     procs = []
     for line in out.strip().split("\n"):
         if not line or "No running processes" in line:
@@ -218,6 +253,8 @@ def get_gpu_processes():
 
 def get_gpu_uuid_to_index():
     out = _nvsmi("gpu", "index,uuid")
+    if out is None:
+        return None
     m = {}
     for line in out.strip().split("\n"):
         if not line:
@@ -271,13 +308,18 @@ def get_parent_pid(pid):
 def list_gpu_processes_with_owner():
     """Every GPU compute process joined to its owner, GPU index and pgid.
 
-    `gpu_idx` is None for a uuid not in the full-GPU map (e.g. MIG instances);
-    `owner`/`pgid` are None if the process exited between the nvidia-smi and
-    ps/getpgid calls. Callers decide how to treat the None cases.
+    Returns None if nvidia-smi failed (so audit callers can skip the run
+    instead of treating it as 'no processes'). `gpu_idx` is None for a uuid
+    not in the full-GPU map (e.g. MIG instances); `owner`/`pgid` are None if
+    the process exited between the nvidia-smi and ps/getpgid calls. Callers
+    decide how to treat the None cases.
     """
     uuid_to_idx = get_gpu_uuid_to_index()
+    procs = get_gpu_processes()
+    if uuid_to_idx is None or procs is None:
+        return None
     out = []
-    for p in get_gpu_processes():
+    for p in procs:
         out.append({
             **p,
             "gpu_idx": uuid_to_idx.get(p["gpu_uuid"]),
@@ -332,23 +374,127 @@ def is_pid_alive(pid):
         return False
 
 
+def pid_start_time(pid):
+    """Kernel start time of `pid` (field 22 of /proc/<pid>/stat), or None.
+
+    Recorded at claim time and compared at reap time so a recycled PID (same
+    number, different process — e.g. after a reboot) is not mistaken for a
+    still-running supervisor."""
+    try:
+        with open(f"/proc/{int(pid)}/stat") as f:
+            data = f.read()
+        return int(data[data.rindex(")") + 1:].split()[19])
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def entry_pid_alive(entry):
+    """Is the entry's recorded supervisor process still the same live process?"""
+    pid = entry.get("pid")
+    if not is_pid_alive(pid):
+        return False
+    recorded = entry.get("pid_start")
+    if recorded is not None:
+        current = pid_start_time(pid)
+        if current is not None and current != recorded:
+            return False  # PID was recycled by an unrelated process
+    return True
+
+
+def is_pgid_alive(pgid):
+    try:
+        os.killpg(int(pgid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # group exists, owned by another user
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def child_group_alive(entry):
+    """Is the entry's recorded child process group still THIS job's group?
+
+    pgid numbers recycle (and running.json persists across reboots), so a bare
+    is_pgid_alive would let an unrelated group pin a dead job's entry forever.
+    When the entry recorded the group leader's start time, require it to still
+    match; if the leader exited while its workers live on, /proc/<pgid> is
+    gone and we conservatively treat the group as alive."""
+    pgid = entry.get("child_pgid")
+    if pgid is None or not is_pgid_alive(pgid):
+        return False
+    recorded = entry.get("child_pgid_start")
+    if recorded is not None:
+        current = pid_start_time(pgid)
+        if current is not None and current != recorded:
+            return False  # pgid number was recycled by an unrelated group
+    return True
+
+
 def reap_running(jobs):
-    """Drop entries from this host whose PID is gone."""
-    out = []
+    """Split running entries into (kept, lost). Pure function, no I/O.
+
+    An entry from this host is kept while its supervisor is alive — or, with
+    the supervisor gone, while its child process group still runs (an orphaned
+    job: the GPU genuinely stays in use, so it must stay allocated and keep
+    accruing live usage). Only when both are gone is the entry `lost`; callers
+    that persist the kept list must also call record_lost_running(lost) so the
+    job's GPU-hours land in the ledger instead of vanishing.
+    Foreign-host entries are not ours to reap.
+    """
+    kept, lost = [], []
     for j in jobs:
         if j.get("host") != HOST:
-            out.append(j)  # foreign-host entries are not ours to reap
+            kept.append(j)
             continue
-        if is_pid_alive(j.get("pid")):
-            out.append(j)
-    return out
+        if entry_pid_alive(j):
+            kept.append(j)
+        elif child_group_alive(j):
+            kept.append(j)  # orphaned but still running on the GPU
+        else:
+            lost.append(j)
+    return kept, lost
+
+
+def reap_queued(jobs):
+    """Split queued entries into (kept, lost): drop this-host entries whose
+    waiting submit process is gone (SIGKILL, crash, reboot). Without this, one
+    dead normal-priority waiter would starve every deprioritized submitter
+    forever via the yield check in _wait_for_slot. Pure function, no I/O."""
+    kept, lost = [], []
+    for j in jobs:
+        if j.get("host") != HOST:
+            kept.append(j)
+        elif entry_pid_alive(j):
+            kept.append(j)
+        else:
+            lost.append(j)
+    return kept, lost
 
 
 # ---------------------------------------------------------------------------
-# Quota: rolling 7-day GPU-hour ledger
+# Job ledger: one JSON line per job event in usage.jsonl
+#
+# Record types (the "event" key; absent = "end", which absorbs legacy lines):
+#   end       — a job finished; carries the full job context plus exit_code and
+#               end_reason (completed|failed|timed_out|killed|lost). Synthetic
+#               "lost" records are written by the reaper when a job's
+#               supervisor AND child died without reaching run_and_wait's
+#               accounting (e.g. SIGKILL of the supervisor).
+#   cancelled — a queued submit was abandoned before it ran (Ctrl-C / SIGTERM /
+#               waiter process died).
+#   rejected  — a submit was refused outright (no free slot without --queue,
+#               or pinned --devices unavailable). Records unmet demand.
+#
+# Compatibility contract (lets old and new gpuq versions share the file):
+# every record that should be quota-charged carries user + ended_at + numeric
+# gpu_hours; every record that should NOT be charged uses "at" instead of
+# "ended_at". Old readers skip records without a parseable ended_at; new
+# readers default a missing "event" to "end".
 # ---------------------------------------------------------------------------
 def append_usage(record):
-    """Append one job's usage line to USAGE_FILE. Caller holds the lock."""
+    """Append one event line to USAGE_FILE. Caller holds the lock."""
     line = json.dumps(record, separators=(",", ":")) + "\n"
     with open(USAGE_FILE, "a") as f:
         f.write(line)
@@ -365,18 +511,15 @@ def _parse_iso(s):
         return None
 
 
-def usage_in_window(user, window_hours=QUOTA_WINDOW_HOURS, now=None):
-    """Sum gpu_hours for `user` in the trailing window. Reads ledger + running.
-
-    Counts running jobs at their current elapsed runtime so a long-running job
-    is reflected in the budget before it ends.
-    """
-    now = now or datetime.now()
-    cutoff = now - timedelta(hours=window_hours)
-    total = 0.0
-    if USAGE_FILE.exists():
+def iter_usage_records():
+    """Yield every parseable ledger record, oldest file first, with `event`
+    defaulted to "end". Reads any manually rotated usage-*.jsonl files (sorted,
+    so usage-2026-01.jsonl precedes usage-2026-02.jsonl) before the live file.
+    One malformed line never aborts the scan."""
+    paths = sorted(QUEUE_DIR.glob("usage-*.jsonl")) + [USAGE_FILE]
+    for path in paths:
         try:
-            with open(USAGE_FILE) as f:
+            with open(path) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -385,24 +528,194 @@ def usage_in_window(user, window_hours=QUOTA_WINDOW_HOURS, now=None):
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if rec.get("user") != user:
+                    if not isinstance(rec, dict):
                         continue
-                    ended = _parse_iso(rec.get("ended_at", ""))
-                    if ended is None or ended < cutoff:
-                        continue
-                    total += float(rec.get("gpu_hours", 0))
+                    rec.setdefault("event", "end")
+                    yield rec
         except OSError:
-            pass
+            continue
+
+
+def _record_window_hours(rec, cutoff, now):
+    """GPU-hours of one end record that fall inside [cutoff, now], or 0.0.
+
+    Records whose span is known (started_at + ended_at) are clamped to the
+    window so a job that straddles the cutoff is only charged for the
+    in-window portion; records without a span fall back to full gpu_hours.
+    """
+    ended = _parse_iso(rec.get("ended_at", ""))
+    if ended is None or ended < cutoff:
+        return 0.0
+    try:
+        gpu_hours = float(rec.get("gpu_hours", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if gpu_hours <= 0:
+        return 0.0
+    started = _parse_iso(rec.get("started_at", ""))
+    if started is None or started >= ended:
+        return gpu_hours
+    span_h = (ended - started).total_seconds() / 3600.0
+    overlap_h = ((min(ended, now) - max(started, cutoff)).total_seconds()
+                 / 3600.0)
+    if overlap_h <= 0:
+        return 0.0
+    return gpu_hours * min(1.0, overlap_h / span_h) if span_h > 0 else gpu_hours
+
+
+def usage_in_window(user, window_hours=QUOTA_WINDOW_HOURS, now=None):
+    """Sum gpu_hours for `user` in the trailing window. Reads ledger + running.
+
+    Counts running jobs at their current elapsed runtime so a long-running job
+    is reflected in the budget before it ends, and clamps both finished and
+    running jobs to the window so hours burned before the cutoff don't count.
+    """
+    now = now or datetime.now()
+    cutoff = now - timedelta(hours=window_hours)
+    total = 0.0
+    for rec in iter_usage_records():
+        if rec.get("event") != "end" or rec.get("user") != user:
+            continue
+        total += _record_window_hours(rec, cutoff, now)
     for j in load_running():
         if j.get("user") != user:
             continue
         started = _parse_iso(j.get("started_at", ""))
         if started is None:
             continue
-        elapsed = max(0.0, (now - started).total_seconds() / 3600.0)
+        elapsed = max(0.0, (now - max(started, cutoff)).total_seconds() / 3600.0)
         count = len(j.get("gpus") or []) or j.get("gpu_count", 1)
         total += elapsed * count
     return total
+
+
+def _end_record(job, started, ended, exit_code, reason, synthetic=False):
+    """Build a ledger end record from a running-list entry / job dict."""
+    elapsed_h = max(0.0, (ended - started).total_seconds() / 3600.0)
+    gpus = list(job.get("gpus") or [])
+    rec = {
+        "v": 2,
+        "event": "end",
+        "id": job.get("id"),
+        "user": job.get("user", USER),
+        "host": job.get("host", HOST),
+        "command": (job.get("command") or "")[:COMMAND_LOG_MAX_CHARS],
+        "name": job.get("name"),
+        "gpus_requested": job.get("gpu_count"),
+        "gpus": gpus,
+        "devices": job.get("devices"),
+        "memory_gb": job.get("memory_gb"),
+        "max_time_hours": job.get("max_time_hours"),
+        "priority": job.get("priority", "normal"),
+        "over_quota_at_submit": job.get("over_quota_at_submit", False),
+        "submitted_at": job.get("submitted_at"),
+        "started_at": started.isoformat(timespec="seconds"),
+        "ended_at": ended.isoformat(timespec="seconds"),
+        "queue_wait_sec": job.get("queue_wait_sec"),
+        "elapsed_hours": round(elapsed_h, 4),
+        "gpu_hours": round(elapsed_h * len(gpus), 4),
+        "exit_code": exit_code,
+        "end_reason": reason,
+    }
+    if synthetic:
+        rec["synthetic"] = True
+    return rec
+
+
+def record_lost_running(lost, now=None):
+    """Write a synthetic end record for each reaped running entry whose
+    supervisor and child died without reaching run_and_wait's accounting.
+    Caller holds the lock and has already persisted the kept list. Charging
+    runs to the reap time but is capped at the job's own time limit (the
+    timer would have killed it there anyway)."""
+    now = now or datetime.now()
+    for j in lost:
+        started = _parse_iso(j.get("started_at", "")) or now
+        ended = now
+        max_h = j.get("max_time_hours")
+        try:
+            if max_h and float(max_h) > 0:
+                cap = started + timedelta(hours=float(max_h))
+                ended = min(now, cap)
+        except (TypeError, ValueError):
+            pass
+        if ended < started:
+            ended = started
+        append_usage(_end_record(j, started, ended, None, "lost",
+                                 synthetic=True))
+
+
+def _cancelled_record(j, reason, now):
+    """Ledger event for a queued submit that never ran. Uses "at" (not
+    ended_at) so quota readers — old and new — never charge these."""
+    submitted = _parse_iso(j.get("submitted_at", ""))
+    wait_sec = int((now - submitted).total_seconds()) if submitted else None
+    return {
+        "v": 2,
+        "event": "cancelled",
+        "id": j.get("id"),
+        "user": j.get("user", USER),
+        "host": j.get("host", HOST),
+        "command": (j.get("command") or "")[:COMMAND_LOG_MAX_CHARS],
+        "name": j.get("name"),
+        "gpus_requested": j.get("gpu_count"),
+        "devices": j.get("devices"),
+        "memory_gb": j.get("memory_gb"),
+        "max_time_hours": j.get("max_time_hours"),
+        "priority": j.get("priority", "normal"),
+        "submitted_at": j.get("submitted_at"),
+        "at": now.isoformat(timespec="seconds"),
+        "wait_sec": wait_sec,
+        "reason": reason,
+    }
+
+
+def record_lost_queued(lost, now=None):
+    """Write a cancelled event for each queued entry whose waiting submit
+    process died. Caller holds the lock."""
+    now = now or datetime.now()
+    for j in lost:
+        append_usage(_cancelled_record(j, "lost", now))
+
+
+def record_rejected_submit(args, memory_gb, max_time_hours, reason,
+                           devices=None, now=None):
+    """Log a submit that was refused outright (unmet demand). Takes the lock
+    itself — the rejection paths run outside it."""
+    now = now or datetime.now()
+    rec = {
+        "v": 2,
+        "event": "rejected",
+        "user": USER,
+        "host": HOST,
+        "at": now.isoformat(timespec="seconds"),
+        "reason": reason,
+        "gpus_requested": args.gpus,
+        "devices": devices,
+        "memory_gb": memory_gb,
+        "max_time_hours": max_time_hours,
+        "name": args.name,
+    }
+    try:
+        with file_lock(LOCK_FILE):
+            append_usage(rec)
+    except OSError:
+        pass  # never let logging break the user-facing error path
+
+
+def reap_all_locked():
+    """Reap running + queued state and persist the survivors; synthesize
+    ledger records for what died. Caller holds the lock. Returns the kept
+    (running, queued) lists."""
+    running, lost_r = reap_running(load_running())
+    if lost_r:
+        save_running(running)
+        record_lost_running(lost_r)
+    queued, lost_q = reap_queued(load_queued())
+    if lost_q:
+        save_queued(queued)
+        record_lost_queued(lost_q)
+    return running, queued
 
 
 def quota_for_user(user, config):
@@ -438,9 +751,13 @@ def _gpu_owner_sets(running_jobs, user):
     """Split GPUs held by running jobs into those `user` owns and those held by
     other users. A GPU co-tenanted by both counts as other-held — we never hand
     a user a card someone else is on. A job with no recorded user is treated as
-    other-held (safe: such a card is never auto-claimed)."""
+    other-held (safe: such a card is never auto-claimed). Only this host's jobs
+    count: GPU indices from records written under another hostname (e.g. before
+    a rename) are meaningless here and must not block local cards."""
     owned, others = set(), set()
     for j in running_jobs:
+        if j.get("host", HOST) != HOST:
+            continue
         target = owned if j.get("user") == user else others
         for gi in j.get("gpus", []):
             target.add(int(gi))
@@ -510,7 +827,7 @@ def gpu_unavailability(devices, gpus, running_jobs, want_memory_gb, user):
     owned, others = _gpu_owner_sets(running_jobs, user)
     held = {}
     for j in running_jobs:
-        if j.get("user") == user:
+        if j.get("user") == user or j.get("host", HOST) != HOST:
             continue
         for gi in j.get("gpus", []):
             held[int(gi)] = j
@@ -733,12 +1050,26 @@ def notify_rebind(owner, sample, deadline, config, kind="warn"):
     return send_email(to, subject, body, config)
 
 
-def enforce_kill_pgid(pgid):
+def enforce_kill_pgid(pgid, expect_owner=None, sample_pid=None):
     """SIGTERM a process group, grace, then SIGKILL. Privilege-aware.
 
     Returns True if the group is gone (or was already gone), False if we lack
     the privilege to signal it (another user's process and we are not root).
+
+    The audit data this acts on can be minutes old and pgids recycle, so when
+    the caller provides the recorded owner and a sampled member pid, the
+    target is re-verified immediately before signalling; on mismatch nothing
+    is killed (the next audit run re-flags the real offender).
     """
+    if expect_owner is not None and sample_pid is not None:
+        cur_owner = get_process_user(sample_pid)
+        cur_pgid = get_process_pgid(sample_pid)
+        if (cur_owner != expect_owner or cur_pgid is None
+                or int(cur_pgid) != int(pgid)):
+            print(f"[gpuq audit] not killing process group {pgid}: it no "
+                  f"longer matches the recorded offender ({expect_owner}); "
+                  "deferring to the next audit run.", file=sys.stderr)
+            return False
     try:
         os.killpg(int(pgid), signal.SIGTERM)
     except ProcessLookupError:
@@ -770,10 +1101,17 @@ def enforce_kill_pgid(pgid):
 # Building job records
 # ---------------------------------------------------------------------------
 def _new_job_id():
-    return int(time.time() * 1000) % 2**31
+    # Mix in the PID so two submits landing in the same millisecond (e.g. a
+    # sweep loop) don't mint the same id; removals also match on (host, pid).
+    return (int(time.time() * 1000) ^ (os.getpid() << 12)) % 2**31
 
 
-def build_running_job(cmd, args, gpus, memory_gb, max_time_hours, job_id=None):
+def build_running_job(cmd, args, gpus, memory_gb, max_time_hours, job_id=None,
+                      submitted_at=None, devices=None, over_quota=False):
+    now = datetime.now()
+    submitted = submitted_at or now.isoformat(timespec="seconds")
+    sub_dt = _parse_iso(submitted)
+    wait_sec = int((now - sub_dt).total_seconds()) if sub_dt else None
     return {
         "id": job_id or _new_job_id(),
         "user": USER,
@@ -783,18 +1121,23 @@ def build_running_job(cmd, args, gpus, memory_gb, max_time_hours, job_id=None):
         "virtual_env": detect_virtual_environment(),
         "gpu_count": args.gpus,
         "gpus": gpus,
+        "devices": devices,
         "memory_gb": memory_gb,
         "max_time_hours": max_time_hours,
-        "submitted_at": datetime.now().isoformat(timespec="seconds"),
-        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "over_quota_at_submit": over_quota,
+        "submitted_at": submitted,
+        "started_at": now.isoformat(timespec="seconds"),
+        "queue_wait_sec": max(0, wait_sec) if wait_sec is not None else None,
         "pid": os.getpid(),
+        "pid_start": pid_start_time(os.getpid()),
         "name": args.name,
         "notify_email": args.notify,
         "status": "running",
     }
 
 
-def build_queued_job(cmd, args, memory_gb, max_time_hours, priority="normal"):
+def build_queued_job(cmd, args, memory_gb, max_time_hours, priority="normal",
+                     submitted_at=None, devices=None):
     return {
         "id": _new_job_id(),
         "user": USER,
@@ -803,10 +1146,12 @@ def build_queued_job(cmd, args, memory_gb, max_time_hours, priority="normal"):
         "working_directory": os.getcwd(),
         "virtual_env": detect_virtual_environment(),
         "gpu_count": args.gpus,
+        "devices": devices,
         "memory_gb": memory_gb,
         "max_time_hours": max_time_hours,
-        "submitted_at": datetime.now().isoformat(timespec="seconds"),
+        "submitted_at": submitted_at or datetime.now().isoformat(timespec="seconds"),
         "pid": os.getpid(),
+        "pid_start": pid_start_time(os.getpid()),
         "name": args.name,
         "notify_email": args.notify,
         "priority": priority,
@@ -824,23 +1169,23 @@ def _drop_my_queued_entry(queued):
 
 
 def _try_claim(cmd, args, memory_gb, max_time_hours, devices=None,
-               deprioritized=False):
+               deprioritized=False, submitted_at=None):
     """One attempt, under the lock, to grab a slot. Returns (job, picked) on
     success or (None, None). Reaps stale jobs first and drops our own queued
     entry when we win, so a waiter that finally claims also leaves the queue."""
     with file_lock(LOCK_FILE):
-        running = reap_running(load_running())
-        save_running(running)
+        running, queued = reap_all_locked()
         gpus = get_gpu_info()
         picked = pick_gpus(args.gpus, memory_gb, gpus, running, USER, devices=devices)
         if picked is None:
             return None, None
-        job = build_running_job(cmd, args, picked, memory_gb, max_time_hours)
+        job = build_running_job(cmd, args, picked, memory_gb, max_time_hours,
+                                submitted_at=submitted_at, devices=devices,
+                                over_quota=deprioritized)
         if deprioritized:
             job["priority"] = "low"
         running.append(job)
         save_running(running)
-        queued = load_queued()
         new_q = _drop_my_queued_entry(queued)
         if len(new_q) != len(queued):
             save_queued(new_q)
@@ -848,21 +1193,63 @@ def _try_claim(cmd, args, memory_gb, max_time_hours, devices=None,
 
 
 def _wait_for_slot(cmd, args, memory_gb, max_time_hours, config, devices=None,
-                   deprioritized=False):
+                   deprioritized=False, submitted_at=None):
     """Poll until a slot can be claimed, returning (job, picked). Registers a
     one-time queued entry so other submitters see us and yield as configured;
-    Ctrl-C drops that entry and exits 130. Used by --queue submits (with
+    the job keeps the queued entry's id when it finally runs. Ctrl-C, SIGTERM
+    and SIGHUP (closed terminal) all drop that entry, log a cancelled event,
+    and exit with the conventional code. Used by --queue submits (with
     `devices` pinned or not) and by deprioritized over-quota submits."""
     poll_interval = (DEPRIORITIZED_POLL_INTERVAL_SEC if deprioritized
                      else QUEUE_POLL_INTERVAL_SEC)
-    queued_announced = False
+    qjob = None
     first_iter = True
+    prev_handlers = {}
+
+    def _restore_handlers():
+        for s, h in prev_handlers.items():
+            try:
+                signal.signal(s, h)
+            except (ValueError, OSError):
+                pass
+
+    def _cancel(reason, exit_code, label):
+        # Ignore further termination signals while cleaning up: a second
+        # signal re-entering this function mid-flock would self-deadlock.
+        for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            try:
+                signal.signal(s, signal.SIG_IGN)
+            except (ValueError, OSError):
+                pass
+        with file_lock(LOCK_FILE):
+            save_queued(_drop_my_queued_entry(load_queued()))
+            if qjob is not None:
+                append_usage(_cancelled_record(qjob, reason, datetime.now()))
+        print(f"\n[gpuq] {label} while queued.", file=sys.stderr)
+        sys.exit(exit_code)
+
+    class _SignalCancel(Exception):
+        pass
+
+    def _on_term(sig, _frame):
+        # Only raise — NEVER do locked work inside a signal handler. flock is
+        # not reentrant for a second fd in the same process, so a handler that
+        # locks while the interrupted frame holds the lock wedges this waiter
+        # (and, since it HOLDS the host-wide lock, every other gpuq command).
+        # The raise unwinds the with-block, releasing the lock, and the except
+        # below runs _cancel outside the locked region — exactly the mechanism
+        # that makes the Ctrl-C/KeyboardInterrupt path safe.
+        raise _SignalCancel(sig)
+
     try:
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                prev_handlers[s] = signal.signal(s, _on_term)
+            except (ValueError, OSError):
+                pass
         while True:
             with file_lock(LOCK_FILE):
-                running = reap_running(load_running())
-                save_running(running)
-                queued = load_queued()
+                running, queued = reap_all_locked()
                 normal_waiting = any(
                     j.get("priority", "normal") == "normal"
                     and j.get("host") == HOST
@@ -877,8 +1264,11 @@ def _wait_for_slot(cmd, args, memory_gb, max_time_hours, config, devices=None,
                     picked = pick_gpus(args.gpus, memory_gb, gpus, running, USER,
                                        devices=devices)
                     if picked is not None:
-                        job = build_running_job(cmd, args, picked, memory_gb,
-                                                max_time_hours)
+                        job = build_running_job(
+                            cmd, args, picked, memory_gb, max_time_hours,
+                            job_id=qjob["id"] if qjob else None,
+                            submitted_at=submitted_at, devices=devices,
+                            over_quota=deprioritized)
                         if deprioritized:
                             job["priority"] = "low"
                         running.append(job)
@@ -886,46 +1276,70 @@ def _wait_for_slot(cmd, args, memory_gb, max_time_hours, config, devices=None,
                         new_q = _drop_my_queued_entry(queued)
                         if len(new_q) != len(queued):
                             save_queued(new_q)
+                        # Back to the previous disposition: from here the job
+                        # is RUNNING, and a stale _on_term firing before
+                        # run_and_wait installs its forwarder would log a
+                        # bogus 'cancelled' event for a job that started.
+                        _restore_handlers()
                         return job, picked
-                if not queued_announced:
+                if qjob is None:
                     priority = "low" if deprioritized else "normal"
                     qjob = build_queued_job(cmd, args, memory_gb, max_time_hours,
-                                            priority=priority)
+                                            priority=priority,
+                                            submitted_at=submitted_at,
+                                            devices=devices)
                     queued.append(qjob)
                     save_queued(queued)
                     tag = " (deprioritized)" if deprioritized else ""
                     pin = (f" [devices {','.join(map(str, devices))}]"
                            if devices else "")
                     print(f"[gpuq] no slot; queued as job {qjob['id']}{tag}{pin}, "
-                          f"polling every {poll_interval}s. Ctrl-C to cancel.",
+                          f"polling every {poll_interval}s. Ctrl-C to cancel "
+                          f"(or `gpuq kill {qjob['id']}` from another terminal).",
                           file=sys.stderr)
-                    queued_announced = True
             first_iter = False
             time.sleep(poll_interval)
     except KeyboardInterrupt:
-        with file_lock(LOCK_FILE):
-            save_queued(_drop_my_queued_entry(load_queued()))
-        print("\n[gpuq] cancelled while queued.", file=sys.stderr)
-        sys.exit(130)
+        _cancel("user", 130, "cancelled")
+    except _SignalCancel as e:
+        sig = int(e.args[0])
+        _cancel("signal", 128 + sig, f"cancelled (signal {sig})")
 
 
 def cmd_submit(args, config):
+    submitted_at = datetime.now().isoformat(timespec="seconds")
     cmd = list(args.cmd_args or [])
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if args.command:
+        if cmd:
+            die("give the command either after `--` or via --command, not both.")
         cmd = shlex.split(args.command)
     if not cmd:
         die("no command given. Use:  gpuq submit [opts] -- COMMAND ARGS...")
 
-    memory_gb = (args.memory if args.memory is not None
-                 else config.get("max_memory_per_gpu_gb", DEFAULT_MAX_MEMORY_GB))
+    # -m default: the admission filter (min free VRAM a candidate GPU needs).
+    # Falls back to max_memory_per_gpu_gb for configs that predate the
+    # dedicated default_min_free_gb key.
+    memory_default = config.get(
+        "default_min_free_gb",
+        config.get("max_memory_per_gpu_gb", DEFAULT_MAX_MEMORY_GB))
+    memory_gb = args.memory if args.memory is not None else memory_default
     max_time_hours = (args.time if args.time is not None
                       else config.get("max_job_time_hours", DEFAULT_MAX_TIME_HOURS))
+    try:
+        max_time_hours = float(max_time_hours)
+    except (TypeError, ValueError):
+        max_time_hours = DEFAULT_MAX_TIME_HOURS
+    if max_time_hours <= 0:
+        die("-t/--time must be > 0 hours; there is no unlimited mode "
+            "(ask the admin to raise max_job_time_hours if you need longer).")
 
     # --devices: pin exact GPU(s). Each must be free or already owned by you.
     # Without --queue, reject immediately with a per-GPU reason; with --queue,
-    # wait until all of them are available. Bypasses the random picker and quota.
+    # wait until all of them are available. Pinning bypasses the random picker
+    # but NOT the quota gate.
+    devices = None
     if args.devices:
         try:
             devices = sorted({int(x) for x in args.devices.split(",") if x.strip()})
@@ -933,31 +1347,36 @@ def cmd_submit(args, config):
             die(f"--devices must be comma-separated GPU indices, got {args.devices!r}")
         if not devices:
             die("--devices was given but empty")
+        if args.gpus is not None and args.gpus != len(devices):
+            die(f"--devices {args.devices} implies -g {len(devices)}; "
+                "drop -g or make them match.")
         args.gpus = len(devices)   # records + accounting use the real count
-        job, picked = _try_claim(cmd, args, memory_gb, max_time_hours, devices=devices)
-        if job is None:
-            if not args.queue:
-                with file_lock(LOCK_FILE):
-                    running = reap_running(load_running())
-                    gpus = get_gpu_info()
-                reasons = gpu_unavailability(devices, gpus, running, memory_gb, USER)
-                die("requested GPU(s) not available — not submitting:\n  "
-                    + "\n  ".join(reasons) + "\nPass --queue to wait for them.")
-            job, picked = _wait_for_slot(cmd, args, memory_gb, max_time_hours,
-                                         config, devices=devices)
-        print(f"[gpuq] job {job['id']} starting on GPU(s) "
-              f"{','.join(map(str, picked))}", file=sys.stderr)
-        run_and_wait(job, cmd, picked, max_time_hours, args, config)
-        return
+    elif args.gpus is None:
+        args.gpus = 1
+
+    # Sanity-check the request against the actual hardware so --queue can
+    # never poll forever for something this host cannot satisfy.
+    if args.gpus < 1:
+        die("-g/--gpus must be at least 1.")
+    n_total = len(get_gpu_info())
+    if n_total:
+        if args.gpus > n_total:
+            die(f"this host has {n_total} GPU(s); you asked for {args.gpus}.")
+        if devices:
+            bad = [d for d in devices if d < 0 or d >= n_total]
+            if bad:
+                die(f"no such GPU index(es) {bad} on {HOST} "
+                    f"(valid: 0..{n_total - 1}).")
 
     # Quota: rolling 7-day GPU-hour budget, per user. Over-quota submitters are
     # deprioritized — forced into queue mode with a longer poll interval — and
-    # emailed once. Charging is by actual runtime at job end (see run_and_wait).
-    requested_gpu_hours = args.gpus * (max_time_hours or 0)
+    # emailed once. Applies to pinned (--devices) submits too: pinning chooses
+    # WHICH card you get, not WHETHER you skip the line. Charging is by actual
+    # runtime at job end (see run_and_wait).
+    requested_gpu_hours = args.gpus * max_time_hours
     over, used, budget = would_exceed_quota(USER, requested_gpu_hours, config)
-    deprioritized = False
+    deprioritized = bool(over)
     if over:
-        deprioritized = True
         msg = (f"[gpuq] over quota: used {used:.1f} + requested {requested_gpu_hours:.1f} "
                f"GPU-hours > budget {budget:.1f} (rolling {QUOTA_WINDOW_HOURS}h). "
                "Job DEPRIORITIZED and queued; will only start once on-quota submitters "
@@ -969,14 +1388,29 @@ def cmd_submit(args, config):
     # waits and yields to normal-priority submitters on its first poll.
     job = picked = None
     if not deprioritized:
-        job, picked = _try_claim(cmd, args, memory_gb, max_time_hours)
+        job, picked = _try_claim(cmd, args, memory_gb, max_time_hours,
+                                 devices=devices, submitted_at=submitted_at)
         if job is None and not args.queue:
+            if devices:
+                with file_lock(LOCK_FILE):
+                    running, _ = reap_running(load_running())
+                    gpus = get_gpu_info()
+                reasons = gpu_unavailability(devices, gpus, running, memory_gb, USER)
+                record_rejected_submit(args, memory_gb, max_time_hours,
+                                       "devices_unavailable", devices=devices)
+                die("requested GPU(s) not available — not submitting:\n  "
+                    + "\n  ".join(reasons) + "\nPass --queue to wait for them.")
+            hint = ("" if args.memory is not None else
+                    f"\n(The {memory_gb} GB free-VRAM filter is the default; "
+                    "pass -m <smaller> if your job needs less.)")
+            record_rejected_submit(args, memory_gb, max_time_hours, "no_free_gpu")
             die(f"no free GPU matches your request "
                 f"(need {args.gpus} GPU(s) with >= {memory_gb} GB free, util < "
-                f"{GPU_UTIL_AVAILABLE_THRESHOLD}%). Pass --queue to wait.")
+                f"{GPU_UTIL_AVAILABLE_THRESHOLD}%).{hint} Pass --queue to wait.")
     if job is None:
         job, picked = _wait_for_slot(cmd, args, memory_gb, max_time_hours, config,
-                                     deprioritized=deprioritized)
+                                     devices=devices, deprioritized=deprioritized,
+                                     submitted_at=submitted_at)
 
     print(f"[gpuq] job {job['id']} starting on GPU(s) {','.join(map(str, picked))}",
           file=sys.stderr)
@@ -1078,6 +1512,10 @@ def run_and_wait(job, cmd, gpus, max_time_hours, args, config):
             if j.get("id") == job["id"] and j.get("host") == HOST:
                 j["child_pid"] = child.pid
                 j["child_pgid"] = child.pid
+                # Group-leader identity, so a recycled pgid number can never
+                # pin this entry after the job actually died (see
+                # child_group_alive).
+                j["child_pgid_start"] = pid_start_time(child.pid)
                 if scope:
                     j["cgroup_scope"] = scope
         save_running(running)
@@ -1086,6 +1524,9 @@ def run_and_wait(job, cmd, gpus, max_time_hours, args, config):
 
     def timeout():
         timeout_fired["v"] = True
+        print(f"\n[gpuq] job {job['id']} reached its {max_time_hours}h time "
+              f"limit — sending SIGTERM (SIGKILL in {KILL_GRACE_SEC}s). "
+              "Resubmit with a larger -t to run longer.", file=sys.stderr)
         kill_job(signal.SIGTERM)
         time.sleep(KILL_GRACE_SEC)
         kill_job(signal.SIGKILL)
@@ -1096,6 +1537,7 @@ def run_and_wait(job, cmd, gpus, max_time_hours, args, config):
         timer.daemon = True
         timer.start()
 
+    rc = None
     try:
         rc = child.wait()
     finally:
@@ -1104,27 +1546,25 @@ def run_and_wait(job, cmd, gpus, max_time_hours, args, config):
         ended_wall = datetime.now()
         elapsed_h = max(0.0, (ended_wall - started_wall).total_seconds() / 3600.0)
         gpu_hours = elapsed_h * len(gpus)
+        reason = ("timed_out" if timeout_fired["v"]
+                  else "completed" if rc == 0
+                  else "killed" if (rc is not None and rc < 0)
+                  else "failed")
         with file_lock(LOCK_FILE):
             running = load_running()
             running = [j for j in running
-                       if not (j.get("id") == job["id"] and j.get("host") == HOST)]
+                       if not (j.get("id") == job["id"] and j.get("host") == HOST
+                               and j.get("pid") == os.getpid())]
             save_running(running)
-            append_usage({
-                "id": job["id"],
-                "user": job.get("user", USER),
-                "host": HOST,
-                "gpus": list(gpus),
-                "started_at": started_wall.isoformat(timespec="seconds"),
-                "ended_at": ended_wall.isoformat(timespec="seconds"),
-                "elapsed_hours": round(elapsed_h, 4),
-                "gpu_hours": round(gpu_hours, 4),
-                "priority": job.get("priority", "normal"),
-            })
-        reason = ("timed_out" if timeout_fired["v"]
-                  else "completed" if rc == 0
-                  else "failed")
+            append_usage(_end_record(job, started_wall, ended_wall, rc, reason))
+        hms = str(ended_wall - started_wall).split(".")[0]
+        print(f"[gpuq] job {job['id']} {reason}: ran {hms} on GPU(s) "
+              f"{','.join(map(str, gpus))}, {gpu_hours:.2f} GPU-hours recorded "
+              f"(exit {rc}).", file=sys.stderr)
         notify_completion(job, rc, reason, config, args.notify)
-    sys.exit(rc)
+    # Shell convention for a signal-killed child: 128 + signum (Popen.wait
+    # reports -signum). sys.exit(-15) would otherwise become status 241.
+    sys.exit(128 - rc if rc is not None and rc < 0 else rc)
 
 
 # ---------------------------------------------------------------------------
@@ -1138,48 +1578,83 @@ def _fmt_duration(start_iso):
         return "?"
 
 
+def _truncate(text, width=72):
+    text = (text or "").replace("\n", " ")
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
 def cmd_status(args, config):
     with file_lock(LOCK_FILE):
-        running = reap_running(load_running())
-        save_running(running)
-        queued = load_queued()
+        running, queued = reap_all_locked()
     gpus = get_gpu_info()
 
     print(f"=== GPU Queue Status (host: {HOST}) ===\n")
+    holders = {}
+    for j in running:
+        if j.get("host", HOST) != HOST:
+            continue
+        label = f"{j.get('user', '?')} (job {j.get('id')}"
+        if j.get("name"):
+            label += f", {j['name']}"
+        label += ")"
+        for gi in j.get("gpus", []):
+            holders.setdefault(int(gi), []).append(label)
     print(f"GPUs ({len(gpus)} total):")
-    busy_set = {int(gi) for j in running for gi in j.get("gpus", [])}
     for g in gpus:
-        state = "BUSY" if g["index"] in busy_set else "FREE"
+        state = "BUSY" if g["index"] in holders else "FREE"
         pct = 100 * g["memory_used_mb"] / g["memory_total_mb"] if g["memory_total_mb"] else 0
+        used_gb = g["memory_used_mb"] / 1024
+        total_gb = g["memory_total_mb"] / 1024
         print(f"  GPU {g['index']}: {g['name']} - {state}")
-        print(f"    Memory: {g['memory_used_mb']}/{g['memory_total_mb']} MB ({pct:.0f}%)")
-        print(f"    Utilization: {g['utilization']}%")
+        print(f"    Memory: {used_gb:.0f}/{total_gb:.0f} GB ({pct:.0f}%) - "
+              f"Utilization: {g['utilization']}%")
+        if g["index"] in holders:
+            print(f"    Held by: {'; '.join(holders[g['index']])}")
     print()
 
     print(f"Running Jobs ({len(running)}):")
     if not running:
         print("  (none)")
     for j in running:
+        limit = _safe_float(j.get("max_time_hours"), default=None)
         line = (f"  Job {j['id']} by {j['user']} - GPUs: {j.get('gpus', [])} - "
-                f"Runtime: {_fmt_duration(j.get('started_at', ''))}")
+                f"Runtime: {_fmt_duration(j.get('started_at', ''))}"
+                + (f" / limit {limit:g}h" if limit else ""))
         if j.get("name"):
             line += f" - Name: {j['name']}"
         print(line)
+        if j.get("command"):
+            print(f"    Command: {_truncate(j['command'])}")
     print()
 
+    queued = sorted(queued, key=lambda j: j.get("submitted_at") or "")
     print(f"Queued Jobs ({len(queued)}):")
     if not queued:
         print("  (none)")
     for j in queued:
         prio = j.get("priority", "normal")
         tag = f" [{prio}]" if prio != "normal" else ""
-        print(f"  Job {j['id']} by {j['user']}{tag} - Waiting: "
-              f"{_fmt_duration(j.get('submitted_at', ''))}")
+        want = f"{j.get('gpu_count', 1)} GPU(s)"
+        if j.get("devices"):
+            want = f"GPU {','.join(map(str, j['devices']))} (pinned)"
+        line = (f"  Job {j['id']} by {j['user']}{tag} - Wants: {want} - Waiting: "
+                f"{_fmt_duration(j.get('submitted_at', ''))}")
+        if j.get("name"):
+            line += f" - Name: {j['name']}"
+        print(line)
+        if j.get("command"):
+            print(f"    Command: {_truncate(j['command'])}")
+    if queued:
+        print("  (queue order is informational: free slots go to whichever "
+              "waiter polls first; low priority always yields)")
     print()
 
     print("All GPU compute processes (from nvidia-smi):")
     live = list_gpu_processes_with_owner()
-    if not live:
+    if live is None:
+        print("  (nvidia-smi failed — GPU process list unavailable)")
+        live = []
+    elif not live:
         print("  (none)")
     seen = set()
     for p in live:
@@ -1192,24 +1667,311 @@ def cmd_status(args, config):
         gb = p["memory_mb"] / 1024
         print(f"  pid {p['pid']} ({owner}) on GPU {gpu_idx}: {gb:.1f} GB ({p['name']})")
 
+    used = usage_in_window(USER)
+    budget = quota_for_user(USER, config)
+    print()
+    if budget is None:
+        print(f"Your rolling 7-day usage: {used:.1f} GPU-hours "
+              "(no quota set — usage is recorded to calibrate future budgets; "
+              "see `gpuq quota`)")
+    else:
+        print(f"Your rolling 7-day usage: {used:.1f} / {budget:.1f} GPU-hours "
+              f"({100 * used / budget:.0f}% of budget; see `gpuq quota`)")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: history
+# ---------------------------------------------------------------------------
+def _safe_float(value, default=0.0):
+    """The ledger is group-appendable; a wrong-typed field in one line must
+    render as a placeholder, never crash the whole listing."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_secs(sec):
+    try:
+        sec = int(sec)
+    except (TypeError, ValueError):
+        return "-"
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
+
+
+def _fmt_hours(hours):
+    try:
+        return str(timedelta(seconds=int(float(hours) * 3600)))
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _fmt_when(iso):
+    dt = _parse_iso(iso or "")
+    return dt.strftime("%m-%d %H:%M") if dt else "-"
+
+
+def cmd_history(args, config):
+    """Show recent ledger records (default: your own finished jobs)."""
+    user_filter = None if args.all else (args.user or USER)
+    records = [r for r in iter_usage_records()
+               if user_filter is None or r.get("user") == user_filter]
+    records.sort(key=lambda r: str(r.get("ended_at") or r.get("at") or ""))
+    if not args.events:
+        records = [r for r in records if r.get("event") == "end"]
+    if args.limit > 0:
+        records = records[-args.limit:]
+
+    if args.json:
+        for rec in records:
+            print(json.dumps(rec, separators=(",", ":")))
+        return
+    if not records:
+        who = f" for {user_filter}" if user_filter else ""
+        print(f"no ledger records{who} yet (the ledger only has jobs that "
+              "ended after the job-log deploy).")
+        return
+
+    scope = "all users" if user_filter is None else user_filter
+    print(f"Job history on {HOST} — {scope}, oldest first "
+          f"(see `gpuq history -h` for filters):")
+    cols = (f"{'JOB':<11} " + (f"{'USER':<10} " if args.all else "")
+            + f"{'ENDED':<12} {'WAIT':>7} {'RUNTIME':>9} {'GPUS':<5} "
+              f"{'GPU-H':>7} {'EXIT':>4} {'RESULT':<10} NAME/COMMAND")
+    print(cols)
+    for rec in records:
+        event = rec.get("event", "end")
+        name = rec.get("name") or ""
+        command = (rec.get("command") or "").replace("\n", " ")
+        label = f"{name}: {command}" if name else (command or "-")
+        user_col = f"{(rec.get('user') or '?'):<10} " if args.all else ""
+        if event != "end":
+            when = _fmt_when(rec.get("at"))
+            wait = _fmt_secs(rec.get("wait_sec"))
+            result = f"{event} ({rec.get('reason', '?')})"
+            want = rec.get("gpus_requested")
+            print(f"{str(rec.get('id') or '-'):<11} {user_col}{when:<12} "
+                  f"{wait:>7} {'-':>9} {('?' if want is None else want):<5} "
+                  f"{'-':>7} {'-':>4} {result:<10} {_truncate(label, 48)}")
+            continue
+        gpus = ",".join(map(str, rec.get("gpus") or [])) or "-"
+        exit_code = rec.get("exit_code")
+        result = rec.get("end_reason") or "-"
+        if rec.get("synthetic"):
+            result += "*"
+        print(f"{str(rec.get('id') or '-'):<11} {user_col}"
+              f"{_fmt_when(rec.get('ended_at')):<12} "
+              f"{_fmt_secs(rec.get('queue_wait_sec')):>7} "
+              f"{_fmt_hours(rec.get('elapsed_hours')):>9} {gpus:<5} "
+              f"{_safe_float(rec.get('gpu_hours')):>7.2f} "
+              f"{('-' if exit_code is None else exit_code):>4} "
+              f"{result:<10} {_truncate(label, 48)}")
+    if any(r.get("synthetic") for r in records):
+        print("(*synthetic record: the job's supervisor died before normal "
+              "accounting; charged up to its reap, capped at its time limit)")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: quota
+# ---------------------------------------------------------------------------
+def _window_user_stats(now=None, window_hours=QUOTA_WINDOW_HOURS):
+    """Per-user ledger + live-running stats for the trailing window."""
+    now = now or datetime.now()
+    cutoff = now - timedelta(hours=window_hours)
+    stats = {}
+
+    def bucket(user):
+        return stats.setdefault(user, {
+            "finished_hours": 0.0, "jobs": 0, "lost": 0,
+            "running_jobs": 0, "running_gpus": 0, "live_hours": 0.0,
+        })
+
+    for rec in iter_usage_records():
+        if rec.get("event") != "end" or not rec.get("user"):
+            continue
+        hours = _record_window_hours(rec, cutoff, now)
+        ended = _parse_iso(rec.get("ended_at", ""))
+        if ended is None or ended < cutoff:
+            continue
+        b = bucket(rec["user"])
+        b["finished_hours"] += hours
+        b["jobs"] += 1
+        if rec.get("end_reason") == "lost":
+            b["lost"] += 1
+    for j in load_running():
+        user = j.get("user")
+        started = _parse_iso(j.get("started_at", ""))
+        if not user or started is None:
+            continue
+        gpus = len(j.get("gpus") or []) or j.get("gpu_count", 1)
+        elapsed = max(0.0, (now - max(started, cutoff)).total_seconds() / 3600.0)
+        b = bucket(user)
+        b["running_jobs"] += 1
+        b["running_gpus"] += gpus
+        b["live_hours"] += elapsed * gpus
+    return stats
+
+
+def cmd_quota(args, config):
+    if getattr(args, "report", False):
+        return _quota_report(args, config)
+    now = datetime.now()
+    stats = _window_user_stats(now)
+    if getattr(args, "all", False):
+        q = config.get("quotas") or {}
+        users = sorted(set(stats) | set((q.get("users") or {}).keys()))
+        enforced = any(quota_for_user(u, config) is not None for u in users)
+        mode = ("budgets enforced (over-budget submits are deprioritized)"
+                if enforced else
+                "budgets NOT enforced (usage recorded to calibrate them)")
+        print(f"Rolling {QUOTA_WINDOW_HOURS // 24}-day GPU-hours on {HOST} — {mode}")
+        print(f"{'USER':<12} {'USED':>8} {'LIVE':>8} {'JOBS':>5} {'LOST':>5} "
+              f"{'BUDGET':>8} {'USED%':>6}")
+        total_used = total_live = 0.0
+        for u in users:
+            b = stats.get(u, {"finished_hours": 0, "jobs": 0, "lost": 0,
+                              "running_gpus": 0, "live_hours": 0})
+            used = b["finished_hours"] + b["live_hours"]
+            total_used += b["finished_hours"]
+            total_live += b["live_hours"]
+            budget = quota_for_user(u, config)
+            budget_s = "unlim" if budget is None else f"{budget:.0f}"
+            pct = "-" if budget is None else f"{100 * used / budget:.0f}%"
+            live_s = (f"+{b['live_hours']:.1f}" if b["live_hours"] else "-")
+            print(f"{u:<12} {b['finished_hours']:>8.1f} {live_s:>8} "
+                  f"{b['jobs']:>5} {b['lost']:>5} {budget_s:>8} {pct:>6}")
+        n_gpus = len(get_gpu_info())
+        if n_gpus:
+            capacity = n_gpus * QUOTA_WINDOW_HOURS
+            pct = 100 * (total_used + total_live) / capacity
+            print(f"{'TOTAL':<12} {total_used:>8.1f} "
+                  f"{('+%.1f' % total_live):>8}")
+            print(f"(host capacity {capacity:.0f} GPU-h per window -> "
+                  f"{pct:.0f}% used)")
+        return
+
+    user = getattr(args, "user", None) or USER
+    b = stats.get(user, {"finished_hours": 0.0, "jobs": 0, "lost": 0,
+                         "running_jobs": 0, "running_gpus": 0, "live_hours": 0.0})
+    used = b["finished_hours"] + b["live_hours"]
+    budget = quota_for_user(user, config)
+    print(f"{user} @ {HOST} — rolling {QUOTA_WINDOW_HOURS // 24}-day GPU-hours "
+          f"(window ends {now.strftime('%Y-%m-%d %H:%M')})")
+    lost = f"  ({b['lost']} lost)" if b["lost"] else ""
+    print(f"  finished:  {b['jobs']} job(s), {b['finished_hours']:.1f} GPU-hours{lost}")
+    if b["running_jobs"]:
+        print(f"  running:   {b['running_jobs']} job(s) on {b['running_gpus']} "
+              f"GPU(s), +{b['live_hours']:.1f} GPU-hours and counting")
+    print(f"  total:     {used:.1f} GPU-hours")
+    if budget is None:
+        print("  budget:    unlimited — quotas are not enforced yet; usage is "
+              "recorded so budgets can be set from real data")
+    else:
+        pct = 100 * used / budget
+        print(f"  budget:    {budget:.1f} GPU-hours per {QUOTA_WINDOW_HOURS // 24} "
+              f"days ({pct:.0f}% used)")
+        if used > budget:
+            print("  status:    OVER BUDGET — new submits are DEPRIORITIZED "
+                  "(queued behind on-quota users), never rejected")
+        else:
+            print(f"  status:    OK — {budget - used:.1f} GPU-hours of headroom; "
+                  "submits run at normal priority")
+
+
+def _percentile(values, p):
+    """Linear-interpolation percentile; values need not be sorted."""
+    if not values:
+        return 0.0
+    vs = sorted(values)
+    if len(vs) == 1:
+        return float(vs[0])
+    k = (len(vs) - 1) * p / 100.0
+    lo = int(k)
+    hi = min(lo + 1, len(vs) - 1)
+    return float(vs[lo] + (vs[hi] - vs[lo]) * (k - lo))
+
+
+def _quota_report(args, config):
+    """Weekly per-user statistics for setting budgets, from the full ledger."""
+    weeks = max(1, int(getattr(args, "weeks", 8) or 8))
+    now = datetime.now()
+    cutoff = now - timedelta(weeks=weeks)
+    per_user = {}
+    for rec in iter_usage_records():
+        if rec.get("event") != "end" or not rec.get("user"):
+            continue
+        ended = _parse_iso(rec.get("ended_at", ""))
+        if ended is None or ended < cutoff:
+            continue
+        u = per_user.setdefault(rec["user"], {
+            "weekly": {}, "waits": [], "jobs": 0, "timeout": 0, "lost": 0,
+            "pinned_hours": 0.0, "hours": 0.0,
+        })
+        gpu_hours = _safe_float(rec.get("gpu_hours"))
+        week = ended.strftime("%G-W%V")  # multi-day jobs charge to their end week
+        u["weekly"][week] = u["weekly"].get(week, 0.0) + gpu_hours
+        u["hours"] += gpu_hours
+        u["jobs"] += 1
+        wait = rec.get("queue_wait_sec")
+        if wait is not None:
+            try:
+                u["waits"].append(int(wait))
+            except (TypeError, ValueError):
+                pass
+        if rec.get("end_reason") == "timed_out":
+            u["timeout"] += 1
+        if rec.get("end_reason") == "lost":
+            u["lost"] += 1
+        if rec.get("devices"):
+            u["pinned_hours"] += gpu_hours
+    if not per_user:
+        print(f"no finished jobs in the last {weeks} week(s); nothing to report.")
+        return
+
+    print(f"Weekly GPU-hours per user, last {weeks} ISO week(s) on {HOST}")
+    print(f"{'USER':<12} {'WKS':>3} {'P50':>7} {'P95':>7} {'MAX':>7} {'MEAN':>7} "
+          f"{'WAIT-P50':>8} {'WAIT-P95':>8} {'TIMEOUT%':>8} {'LOST%':>6} {'PINNED%':>7}")
+    host_weekly = {}
+    for u in sorted(per_user):
+        d = per_user[u]
+        totals = list(d["weekly"].values())
+        for wk, h in d["weekly"].items():
+            host_weekly[wk] = host_weekly.get(wk, 0.0) + h
+        print(f"{u:<12} {len(totals):>3} {_percentile(totals, 50):>7.1f} "
+              f"{_percentile(totals, 95):>7.1f} {max(totals):>7.1f} "
+              f"{sum(totals) / len(totals):>7.1f} "
+              f"{_fmt_secs(_percentile(d['waits'], 50)) if d['waits'] else '-':>8} "
+              f"{_fmt_secs(_percentile(d['waits'], 95)) if d['waits'] else '-':>8} "
+              f"{100 * d['timeout'] / d['jobs']:>8.0f} "
+              f"{100 * d['lost'] / d['jobs']:>6.0f} "
+              f"{(100 * d['pinned_hours'] / d['hours']) if d['hours'] else 0:>7.0f}")
+    n_gpus = len(get_gpu_info())
+    if host_weekly and n_gpus:
+        totals = list(host_weekly.values())
+        capacity = n_gpus * 24 * 7
+        print(f"{'HOST':<12} {len(totals):>3} {_percentile(totals, 50):>7.1f} "
+              f"{_percentile(totals, 95):>7.1f} {max(totals):>7.1f} "
+              f"{sum(totals) / len(totals):>7.1f}   "
+              f"-> {100 * _percentile(totals, 50) / capacity:.0f}% / "
+              f"{100 * _percentile(totals, 95) / capacity:.0f}% / "
+              f"{100 * max(totals) / capacity:.0f}% of capacity "
+              f"({capacity:.0f} GPU-h/wk) at p50/p95/max")
+    print("\nhint: a per-user budget near their P95 changes nothing in normal "
+          "weeks and only\ndeprioritizes outlier weeks; sanity-check that "
+          "sum(P95) stays under capacity x ~1.5.\nSet budgets in "
+          f"{CONFIG_FILE} (quotas.default_gpu_hours_per_week / quotas.users).")
+
 
 # ---------------------------------------------------------------------------
 # Subcommand: kill
 # ---------------------------------------------------------------------------
-def cmd_kill(args, config):
-    job_id = args.job_id
-    target = None
-    with file_lock(LOCK_FILE):
-        for j in load_running():
-            if j.get("id") == job_id and j.get("host") == HOST:
-                target = j
-                break
-    if target is None:
-        die(f"no running job {job_id} on this host (or it already finished).")
-    if target.get("user") != USER:
-        die(f"job {job_id} belongs to {target.get('user')}; "
-            "you can only kill your own jobs.")
-
+def _kill_running_job(target):
+    """Terminate one of the caller's running jobs. Returns True on success."""
+    job_id = target["id"]
     scope = target.get("cgroup_scope")
     if scope:
         print(f"stopping job {job_id} (scope {scope})...")
@@ -1221,36 +1983,181 @@ def cmd_kill(args, config):
                                capture_output=True, text=True)
             if r.stdout.strip() != "active":
                 print(f"job {job_id} terminated.")
-                return
+                return True
         print("still alive; escalating to SIGKILL.")
         subprocess.run(["systemctl", "--user", "kill", "--signal=SIGKILL", scope],
                        capture_output=True)
-        return
+        return True
 
     pid = int(target["pid"])
+    child_pgid = target.get("child_pgid")
+
+    # Route on the same identity checks the reaper uses — never signal a raw
+    # PID that may have been recycled by an unrelated process.
+    if not entry_pid_alive(target):
+        # Supervisor gone (or its PID recycled). If the workload survived it
+        # (orphan), kill the child's process group — but only while it is
+        # verifiably still THIS job's group; the reap below then writes the
+        # synthetic ledger record and frees the GPUs.
+        if child_group_alive(target):
+            print(f"job {job_id}'s supervisor is gone but the job is still "
+                  f"running; killing its process group {child_pgid}...")
+            try:
+                os.killpg(int(child_pgid), signal.SIGTERM)
+            except OSError:
+                pass
+            for _ in range(KILL_GRACE_SEC):
+                time.sleep(1)
+                if not child_group_alive(target):
+                    break
+            if child_group_alive(target):
+                try:
+                    os.killpg(int(child_pgid), signal.SIGKILL)
+                except OSError:
+                    pass
+        with file_lock(LOCK_FILE):
+            reap_all_locked()
+        print(f"job {job_id} cleaned up.")
+        return True
+
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(pid, signal.SIGTERM)  # supervisor forwards to the child group
     except ProcessLookupError:
         with file_lock(LOCK_FILE):
-            running = [j for j in load_running() if j.get("id") != job_id]
-            save_running(running)
+            reap_all_locked()
         print(f"job {job_id} was already gone; cleaned up.")
-        return
+        return True
+    except PermissionError:
+        print(f"cannot signal job {job_id}'s supervisor (PID {pid}): "
+              "permission denied.", file=sys.stderr)
+        return False
 
     print(f"sent SIGTERM to job {job_id} (PID {pid}); waiting up to "
           f"{KILL_GRACE_SEC}s...")
     for _ in range(KILL_GRACE_SEC):
         time.sleep(1)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not entry_pid_alive(target):
             print(f"job {job_id} terminated.")
-            return
+            return True
     print("still alive; escalating to SIGKILL.")
+    # SIGKILL the JOB (the child's process group), never the supervisor: a
+    # SIGKILLed supervisor cannot forward anything, so the workload would
+    # survive on the GPU while its record is reaped — a stranded double
+    # allocation. The supervisor then sees the child die and cleans up.
+    if child_pgid is not None:
+        try:
+            os.killpg(int(child_pgid), signal.SIGKILL)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
     try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
+        os.kill(pid, signal.SIGKILL)  # legacy record without child_pgid
+    except (ProcessLookupError, PermissionError, OSError):
         pass
+    return True
+
+
+def _cancel_queued_job(target):
+    """Cancel one of the caller's queued submits. Returns True on success."""
+    job_id = target["id"]
+    if entry_pid_alive(target):
+        # Signal the waiting submit process; its own SIGINT handler drops the
+        # queue entry and writes the cancelled ledger event.
+        try:
+            os.kill(int(target["pid"]), signal.SIGINT)
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            print(f"could not signal queued job {job_id}'s waiting process "
+                  f"(PID {target.get('pid')}): {e}", file=sys.stderr)
+            return False
+        for _ in range(5):
+            time.sleep(1)
+            with file_lock(LOCK_FILE):
+                still = any(j.get("id") == job_id and j.get("host") == HOST
+                            for j in load_queued())
+            if not still:
+                print(f"cancelled queued job {job_id} (signalled waiting "
+                      f"submit, PID {target['pid']}).")
+                return True
+        print(f"queued job {job_id} was signalled but its entry has not "
+              "cleared yet; check `gpuq status`.", file=sys.stderr)
+        return False
+    # Waiter process is already dead: drop the stale entry ourselves.
+    with file_lock(LOCK_FILE):
+        queued = [j for j in load_queued()
+                  if not (j.get("id") == job_id and j.get("host") == HOST)]
+        save_queued(queued)
+        append_usage(_cancelled_record(target, "stale", datetime.now()))
+    print(f"removed stale queue entry {job_id} (its submit process was gone).")
+    return True
+
+
+def cmd_kill(args, config):
+    with file_lock(LOCK_FILE):
+        running, queued = reap_all_locked()
+    running = [j for j in running if j.get("host", HOST) == HOST]
+    queued = [j for j in queued if j.get("host", HOST) == HOST]
+
+    if getattr(args, "mine", False):
+        # Cancel queued waiters FIRST: killing a running job frees its GPUs,
+        # and a still-alive waiter polling during the kill's grace window
+        # would claim them and dodge the sweep.
+        my_queued = [j for j in queued if j.get("user") == USER]
+        my_running = [j for j in running if j.get("user") == USER]
+        if not my_queued and not my_running:
+            print(f"no running or queued jobs for {USER} on {HOST}.")
+            return
+        print(f"killing {len(my_running) + len(my_queued)} job(s) of {USER}: "
+              f"{[j['id'] for j in my_running + my_queued]}")
+        failures = 0
+        for j in my_queued:
+            if not _cancel_queued_job(j):
+                failures += 1
+        # Re-snapshot: a waiter may have claimed a slot between our first
+        # snapshot and its cancellation — its job is now in running.
+        with file_lock(LOCK_FILE):
+            running, _ = reap_all_locked()
+        for j in running:
+            if j.get("host", HOST) == HOST and j.get("user") == USER:
+                if not _kill_running_job(j):
+                    failures += 1
+        if failures:
+            sys.exit(1)
+        return
+
+    ids = list(args.job_id or [])
+    if args.job_id_flag is not None:
+        ids.append(args.job_id_flag)
+    if not ids:
+        die("kill: provide a job ID (see `gpuq status`), e.g. "
+            "`gpuq kill 12345`, or use --mine.")
+
+    by_id_running = {j["id"]: j for j in running}
+    by_id_queued = {j["id"]: j for j in queued}
+    failures = 0
+    for job_id in ids:
+        target = by_id_running.get(job_id)
+        if target is not None:
+            if target.get("user") != USER:
+                print(f"job {job_id} belongs to {target.get('user')}; "
+                      "you can only kill your own jobs.", file=sys.stderr)
+                failures += 1
+            elif not _kill_running_job(target):
+                failures += 1
+            continue
+        target = by_id_queued.get(job_id)
+        if target is not None:
+            if target.get("user") != USER:
+                print(f"queued job {job_id} belongs to {target.get('user')}; "
+                      "you can only cancel your own jobs.", file=sys.stderr)
+                failures += 1
+            elif not _cancel_queued_job(target):
+                failures += 1
+            continue
+        print(f"no running or queued job {job_id} on this host "
+              "(or it already finished).", file=sys.stderr)
+        failures += 1
+    if failures:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +2166,10 @@ def cmd_kill(args, config):
 DEFAULT_CONFIG_TEMPLATE = {
     "max_job_time_hours": 24,
     "max_memory_per_gpu_gb": 70,
+    # Default -m filter: min free VRAM (GB) a candidate GPU needs when the
+    # submitter passes no -m. Distinct from max_memory_per_gpu_gb, which is a
+    # legacy fallback for this default on configs that lack this key.
+    "default_min_free_gb": 16,
     "notification_email": {
         "enabled": False,
         "smtp_server": "smtp.gmail.com",
@@ -1298,14 +2209,18 @@ DEFAULT_CONFIG_TEMPLATE = {
 
 def cmd_config_show(config):
     print(f"Config file: {CONFIG_FILE}")
+    print(f"  Exists:    {CONFIG_FILE.exists()}")
     print(f"  Readable:  {os.access(CONFIG_FILE, os.R_OK)}")
     print(f"Queue dir:   {QUEUE_DIR}")
     print(f"  Writable:  {os.access(QUEUE_DIR, os.W_OK)}")
     print(f"Host:        {HOST}")
     print(f"User:        {USER}")
+    mem_default = config.get(
+        "default_min_free_gb",
+        config.get("max_memory_per_gpu_gb", DEFAULT_MAX_MEMORY_GB))
     print(f"Defaults:    "
           f"max_time={config.get('max_job_time_hours', DEFAULT_MAX_TIME_HOURS)}h, "
-          f"max_memory={config.get('max_memory_per_gpu_gb', DEFAULT_MAX_MEMORY_GB)}GB")
+          f"min_free_vram_filter={mem_default}GB")
     print("Notifications:")
     print(f"  Email enabled: {bool(config.get('notification_email', {}).get('enabled'))}")
     print(f"  Slack enabled: {bool(config.get('slack', {}).get('enabled'))} "
@@ -1313,17 +2228,28 @@ def cmd_config_show(config):
     q = config.get("quotas") or {}
     default_q = q.get("default_gpu_hours_per_week", 0)
     print(f"Quotas:      default={default_q} GPU-h/week, "
-          f"per-user={len((q.get('users') or {}))} entries")
+          f"per-user={len((q.get('users') or {}))} entries "
+          "(0 = unlimited; see `gpuq quota`)")
+    if not CONFIG_FILE.exists():
+        print("\nNo config file yet; an admin can create one with "
+              "`gpuq config init`.", file=sys.stderr)
 
 
 def cmd_config(args, config):
-    """Write a starter config if none exists, or show active settings (--show)."""
-    if getattr(args, "show", False):
+    """Show active settings (default), or write a starter config (`init`)."""
+    if getattr(args, "config_action", None) != "init":
+        if getattr(args, "force", False):
+            # Pre-init `gpuq config --force` used to overwrite the config;
+            # silently showing settings instead would let old automation
+            # "succeed" while writing nothing.
+            die("--force only applies to `gpuq config init`; "
+                "use `gpuq config init --force` to overwrite the config.")
         cmd_config_show(config)
         return
     if CONFIG_FILE.exists() and not getattr(args, "force", False):
         die(f"config already exists at {CONFIG_FILE}; "
-            "use `gpuq config --show` to view, or --force to overwrite.")
+            "use `gpuq config` to view, or `gpuq config init --force` to "
+            "overwrite.")
     try:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w") as f:
@@ -1379,13 +2305,33 @@ def _proc_in_scope(pid, scopes):
     return any(s in cg for s in scopes)
 
 
+def _ancestor_chain(pid, ppid_cache, max_depth=64):
+    """The pid's ancestry, nearest first: [pid, parent, grandparent, ...]."""
+    chain = []
+    cur = int(pid)
+    for _ in range(max_depth):
+        chain.append(cur)
+        if cur <= 1:
+            break
+        if cur not in ppid_cache:
+            ppid_cache[cur] = get_parent_pid(cur)
+        parent = ppid_cache[cur]
+        if parent is None or parent == cur:
+            break
+        cur = parent
+    return chain
+
+
 def _attribute_to_job(p, jobs, ppid_cache):
     """Return the tracked job (on this host) that owns GPU process `p`, or None.
 
     Match order mirrors check_untracked's clearing tests, most-specific first:
       1. cgroup scope — p's cgroup is inside the job's cgroup_scope
       2. child_pgid   — p's process group is the job's child pgid
-      3. ancestry     — p chains up to the job's child pid (a re-setsid'd worker)
+      3. ancestry     — p chains up to a job's child pid (a re-setsid'd
+         worker). When several jobs' child pids sit on the chain (a job that
+         itself ran `gpuq submit`), the NEAREST ancestor wins — attributing a
+         nested job's worker to the outer job would flag it as a rebind.
     A job's cgroup_scope and child_pgid/child_pid are unique per job id, so the
     match is unambiguous even when a user stacks several jobs on one GPU. Jobs
     lacking all three (legacy records) are unmatchable here and yield None — the
@@ -1401,11 +2347,50 @@ def _attribute_to_job(p, jobs, ppid_cache):
             cpg = j.get("child_pgid")
             if cpg is not None and int(pgid) == int(cpg):
                 return j
+    chain = _ancestor_chain(p["pid"], ppid_cache)
+    depth = {pid: i for i, pid in enumerate(chain)}
+    best, best_depth = None, None
     for j in jobs:
         cpid = j.get("child_pid")
-        if cpid is not None and _traces_to_tracked(p["pid"], {int(cpid)}, ppid_cache):
-            return j
-    return None
+        if cpid is None:
+            continue
+        d = depth.get(int(cpid))
+        if d is not None and (best_depth is None or d < best_depth):
+            best, best_depth = j, d
+    return best
+
+
+def _state_group_alive(ent):
+    """Is a detector state entry's offender group still the SAME group?
+
+    Mirrors child_group_alive: pgid numbers recycle, and a stale entry riding
+    a recycled pgid would hand its weeks-old first_seen (= an already-expired
+    deadline) to whatever lands on that pgid next — an instant --enforce kill
+    with zero grace. Entries that predate pgid_start fall back to bare pgid
+    liveness."""
+    pgid = ent.get("pgid")
+    if pgid is None or not is_pgid_alive(pgid):
+        return False
+    recorded = ent.get("pgid_start")
+    if recorded is not None:
+        current = pid_start_time(pgid)
+        if current is not None and current != recorded:
+            return False
+    return True
+
+
+def _fresh_group_entry(ent, pgid):
+    """None-out a matched state entry whose pgid number was recycled by a
+    DIFFERENT group, so the caller treats the sighting as first-seen (fresh
+    grace deadline) instead of inheriting the dead offender's clock."""
+    if ent is None:
+        return None
+    recorded = ent.get("pgid_start")
+    if recorded is not None:
+        current = pid_start_time(pgid)
+        if current is not None and current != recorded:
+            return None
+    return ent
 
 
 def check_untracked(running, audit_cfg, args, config, now=None):
@@ -1458,12 +2443,20 @@ def check_untracked(running, audit_cfg, args, config, now=None):
         if ts and (u not in youngest or ts > youngest[u]):
             youngest[u] = ts
 
+    # nvidia-smi failing is NOT "no GPU processes": skip the whole check so
+    # offender state (first_seen/deadlines) survives a driver blip untouched.
+    procs = list_gpu_processes_with_owner()
+    if procs is None:
+        print("[gpuq audit] nvidia-smi failed; untracked check skipped this "
+              "run.", file=sys.stderr)
+        return []
+
     # Group offending processes by (owner, pgid). A job's workers normally share
     # the child's pgid; a worker that re-ran setsid is still protected by the
     # ancestry check below, so a multi-worker job is one offender at most.
     groups = {}
     ppid_cache = {}
-    for p in list_gpu_processes_with_owner():
+    for p in procs:
         owner, idx, pgid = p["owner"], p["gpu_idx"], p["pgid"]
         if owner is None or idx is None or pgid is None:
             continue                        # ps race / MIG / unknown uuid
@@ -1497,11 +2490,12 @@ def check_untracked(running, audit_cfg, args, config, now=None):
             total_mb = sum(p["memory_mb"] for p in procs)
             sample = {"pid": procs[0]["pid"], "gpus": gidxs,
                       "memory_mb": total_mb, "name": procs[0]["name"]}
-            ent = state.get(sk)
+            ent = _fresh_group_entry(state.get(sk), pgid)
             if ent is None:
                 deadline = now + timedelta(hours=grace_h)
                 state[sk] = {
                     "host": HOST, "owner": owner, "pgid": pgid,
+                    "pgid_start": pid_start_time(pgid),
                     "first_seen": now.isoformat(timespec="seconds"),
                     "last_email": now.isoformat(timespec="seconds"),
                     "reminders": 0, "sample": sample,
@@ -1540,10 +2534,16 @@ def check_untracked(running, audit_cfg, args, config, now=None):
                     f"({total_mb / 1024:.1f} GB) - deadline "
                     f"{deadline.isoformat(timespec='minutes')}")
 
-        # Self-heal: forget entries whose process group is gone on this host
-        # (moved to gpuq or stopped); leave other hosts' entries untouched.
+        # Self-heal: forget entries whose process group is verifiably gone on
+        # this host (moved to gpuq or stopped); leave other hosts' entries
+        # untouched. An entry whose group was merely skipped this run for a
+        # transient reason (VRAM dip below the threshold, the owner's fresh
+        # submit opening the grace window) keeps its first_seen/deadline as
+        # long as the process group itself is still alive — otherwise the
+        # 24h enforcement clock restarts on every such blip and never fires.
         state = {k: v for k, v in state.items()
-                 if k in active or v.get("host") != HOST}
+                 if k in active or v.get("host") != HOST
+                 or _state_group_alive(v)}
         _save(UNTRACKED_STATE_FILE, state)
 
     # Outside the lock: kill (slow + privilege-aware), then email. A successful
@@ -1551,7 +2551,10 @@ def check_untracked(running, audit_cfg, args, config, now=None):
     # suppressed an "overdue" email this run (a kill is a one-time terminal
     # event, so there is no spam risk and the user must be told).
     for item in pending:
-        killed = enforce_kill_pgid(item["pgid"]) if item.get("kill") else False
+        killed = (enforce_kill_pgid(item["pgid"],
+                                    expect_owner=item["owner"],
+                                    sample_pid=item["sample"].get("pid"))
+                  if item.get("kill") else False)
         kind = "killed" if killed else item["kind"]
         if kind is None:
             continue              # past deadline, not yet due, and nothing killed
@@ -1584,11 +2587,19 @@ def check_rebind(running, audit_cfg, args, config, now=None):
 
     jobs = [j for j in running if j.get("host") == HOST]
 
+    # nvidia-smi failing is NOT "no GPU processes": skip the whole check so
+    # offender state (first_seen/deadlines) survives a driver blip untouched.
+    procs = list_gpu_processes_with_owner()
+    if procs is None:
+        print("[gpuq audit] nvidia-smi failed; rebind check skipped this "
+              "run.", file=sys.stderr)
+        return []
+
     # Group offending processes by (job id, pgid): a job's workers share the
     # child's pgid, so a multi-worker rebind is reported as one offender.
     groups = {}
     ppid_cache = {}
-    for p in list_gpu_processes_with_owner():
+    for p in procs:
         owner, idx, pgid = p["owner"], p["gpu_idx"], p["pgid"]
         if owner is None or idx is None or pgid is None:
             continue                        # ps race / MIG / unknown uuid
@@ -1621,11 +2632,12 @@ def check_rebind(running, audit_cfg, args, config, now=None):
             sample = {"pid": grp["procs"][0]["pid"], "gpus": actual,
                       "allocated": allocated, "job_id": job_id,
                       "memory_mb": total_mb, "name": grp["procs"][0]["name"]}
-            ent = state.get(sk)
+            ent = _fresh_group_entry(state.get(sk), pgid)
             if ent is None:
                 deadline = now + timedelta(hours=grace_h)
                 state[sk] = {
                     "host": HOST, "owner": owner, "job_id": job_id, "pgid": pgid,
+                    "pgid_start": pid_start_time(pgid),
                     "first_seen": now.isoformat(timespec="seconds"),
                     "last_email": now.isoformat(timespec="seconds"),
                     "reminders": 0, "sample": sample,
@@ -1665,16 +2677,23 @@ def check_rebind(running, audit_cfg, args, config, now=None):
                     f"GPU {actual} ({total_mb / 1024:.1f} GB) - deadline "
                     f"{deadline.isoformat(timespec='minutes')}")
 
-        # Self-heal: forget entries whose offending group is gone on this host.
+        # Self-heal: forget entries whose offending group is verifiably gone on
+        # this host; a group merely skipped this run for a transient reason
+        # keeps its deadline while its process group is still alive (see the
+        # matching prune in check_untracked).
         state = {k: v for k, v in state.items()
-                 if k in active or v.get("host") != HOST}
+                 if k in active or v.get("host") != HOST
+                 or _state_group_alive(v)}
         _save(REBIND_STATE_FILE, state)
 
     # Outside the lock: kill (slow + privilege-aware), then email. A successful
     # kill ALWAYS notifies, even if the reminder throttle would have suppressed an
     # "overdue" email this run (a kill is a one-time event; the user must be told).
     for item in pending:
-        killed = enforce_kill_pgid(item["pgid"]) if item.get("kill") else False
+        killed = (enforce_kill_pgid(item["pgid"],
+                                    expect_owner=item["owner"],
+                                    sample_pid=item["sample"].get("pid"))
+                  if item.get("kill") else False)
         kind = "killed" if killed else item["kind"]
         if kind is None:
             continue              # past deadline, not yet due, and nothing killed
@@ -1696,8 +2715,7 @@ def cmd_audit(args, config):
     max_total_gb = float(audit_cfg.get("max_total_memory_gb", 50))
 
     with file_lock(LOCK_FILE):
-        running = reap_running(load_running())
-        save_running(running)
+        running, _queued = reap_all_locked()
 
     by_user = {}
     for j in running:
@@ -1721,8 +2739,20 @@ def cmd_audit(args, config):
             )
 
     # Quota breaches: anyone whose used hours in the window > their budget.
+    # Candidates: users with running jobs, users with an explicit quota entry,
+    # AND users seen in the ledger window — a hit-and-run user who is idle at
+    # audit time but burned through the default budget must still be flagged.
+    now = datetime.now()
+    cutoff = now - timedelta(hours=QUOTA_WINDOW_HOURS)
+    ledger_users = set()
+    for rec in iter_usage_records():
+        if rec.get("event") != "end":
+            continue
+        ended = _parse_iso(rec.get("ended_at", ""))
+        if ended is not None and ended >= cutoff and rec.get("user"):
+            ledger_users.add(rec["user"])
     quotas_users = ((config.get("quotas") or {}).get("users") or {})
-    over_quota_users = set(by_user.keys()) | set(quotas_users.keys())
+    over_quota_users = set(by_user.keys()) | set(quotas_users.keys()) | ledger_users
     for u in sorted(over_quota_users):
         budget = quota_for_user(u, config)
         if budget is None:
@@ -1792,7 +2822,9 @@ def main():
             "  gpuq submit --devices 1,3 -- python x.py    pin exact GPUs (else rejected)\n"
             "  gpuq submit --queue -- python train.py      wait if none are free\n"
             "  gpuq status                                 GPUs + running/queued jobs\n"
-            "  gpuq kill 12345                             stop your job\n"
+            "  gpuq history                                your recent jobs from the ledger\n"
+            "  gpuq quota                                  your 7-day GPU-hours vs budget\n"
+            "  gpuq kill 12345                             stop or cancel your job\n"
             "  gpuq audit                                  hogs/quota/untracked (cron)\n"
             "\n"
             "Run `gpuq <command> -h` for a command's full options, "
@@ -1800,12 +2832,12 @@ def main():
         ),
     )
     sub = parser.add_subparsers(
-        dest="action", metavar="{submit,status,kill,config,audit}",
+        dest="action", metavar="{submit,status,history,quota,kill,config,audit}",
         help="run `gpuq <command> -h` for that command's options")
 
     p_submit = sub.add_parser(
         "submit", help="Claim free GPU(s) and run a command on them.")
-    p_submit.add_argument("-g", "--gpus", type=int, default=1,
+    p_submit.add_argument("-g", "--gpus", type=int, default=None,
                           help="Number of whole GPUs to claim (default: 1). gpuq "
                                "picks them at random among the free GPUs.")
     p_submit.add_argument("--devices", default=None,
@@ -1813,13 +2845,15 @@ def main():
                                "(e.g. --devices 1,3); count is taken from the list. "
                                "Each must be free or already yours. Rejected if any "
                                "is held by someone else, UNLESS --queue is given, in "
-                               "which case it waits until all of them are available.")
+                               "which case it waits until all of them are available. "
+                               "Subject to the same quota gate as the picker.")
     p_submit.add_argument("-m", "--memory", type=int, default=None,
-                          help="Minimum free VRAM (GB) a GPU must have to be chosen "
-                               "(default: config max_memory_per_gpu_gb).")
+                          help="Only pick a GPU with at least this much free VRAM "
+                               "in GB (an admission filter, not a reservation; "
+                               "default: config default_min_free_gb).")
     p_submit.add_argument("-t", "--time", type=float, default=None,
-                          help="Max runtime in hours; the job is killed if it runs "
-                               "longer (default: config max_job_time_hours).")
+                          help="Max runtime in hours, > 0; the job is killed if it "
+                               "runs longer (default: config max_job_time_hours).")
     p_submit.add_argument("--queue", action="store_true",
                           help="If no slot is free now, wait and poll instead of "
                                "exiting. Applies to both the default picker and "
@@ -1838,19 +2872,58 @@ def main():
     sub.add_parser(
         "status", help="Show each GPU's state and the running/queued jobs.")
 
-    p_kill = sub.add_parser("kill", help="Stop one of your own running jobs.")
-    p_kill.add_argument("job_id", type=int, nargs="?",
-                        help="ID of your job to stop (see `gpuq status`).")
+    p_hist = sub.add_parser(
+        "history",
+        help="Show your recent jobs from the usage ledger (finished, "
+             "timed-out, lost, ...).")
+    p_hist.add_argument("-n", "--limit", type=int, default=20,
+                        help="Show at most N records (default: 20; 0 = all).")
+    p_hist.add_argument("--all", action="store_true",
+                        help="All users' jobs, not just yours.")
+    p_hist.add_argument("--user", default=None,
+                        help="Another user's jobs (the ledger is group-readable).")
+    p_hist.add_argument("--events", action="store_true",
+                        help="Also show non-job events (cancelled/rejected "
+                             "submits).")
+    p_hist.add_argument("--json", action="store_true",
+                        help="Print raw ledger records as JSON lines.")
+
+    p_quota = sub.add_parser(
+        "quota",
+        help="Show rolling 7-day GPU-hour usage vs budget (yours by default).")
+    p_quota.add_argument("--user", default=None,
+                         help="Another user's usage instead of yours.")
+    p_quota.add_argument("--all", action="store_true",
+                         help="One row per user (plus host capacity).")
+    p_quota.add_argument("--report", action="store_true",
+                         help="Weekly per-user statistics (p50/p95/max, queue "
+                              "waits, timeout/lost rates) for setting budgets.")
+    p_quota.add_argument("--weeks", type=int, default=8,
+                         help="Window for --report, in ISO weeks (default: 8).")
+
+    p_kill = sub.add_parser(
+        "kill", help="Stop your running jobs or cancel your queued ones.")
+    p_kill.add_argument("job_id", type=int, nargs="*",
+                        help="ID(s) of your job(s) to stop or cancel "
+                             "(see `gpuq status`).")
     p_kill.add_argument("--job-id", dest="job_id_flag", type=int,
                         help="Job ID as a flag, instead of the positional argument.")
+    p_kill.add_argument("--mine", action="store_true",
+                        help="Stop ALL of your running jobs and cancel all "
+                             "your queued ones on this host.")
 
     p_config = sub.add_parser(
         "config",
-        help="Write a starter config file, or show active settings (--show).")
+        help="Show active settings; `gpuq config init` writes a starter "
+             "config file (admin).")
+    p_config.add_argument("config_action", nargs="?", choices=["init"],
+                          help="`init` writes the default config template "
+                               "(refuses if one exists; see --force).")
     p_config.add_argument("--show", action="store_true",
-                          help="Print the loaded config, paths, and host/user.")
+                          help="(default) Print the loaded config, paths, and "
+                               "host/user.")
     p_config.add_argument("--force", action="store_true",
-                          help="Overwrite an existing config file.")
+                          help="With `init`: overwrite an existing config file.")
 
     p_audit = sub.add_parser(
         "audit",
@@ -1866,17 +2939,13 @@ def main():
         parser.print_help(sys.stderr)
         sys.exit(2)
 
-    if args.action == "kill":
-        if args.job_id is None and args.job_id_flag is not None:
-            args.job_id = args.job_id_flag
-        if args.job_id is None:
-            die("kill: provide a job ID, e.g. `gpuq kill 12345`.")
-
     config = load_config()
 
     handlers = {
         "submit": cmd_submit,
         "status": cmd_status,
+        "history": cmd_history,
+        "quota": cmd_quota,
         "kill": cmd_kill,
         "config": cmd_config,
         "audit": cmd_audit,

@@ -67,7 +67,7 @@ def test_kill_rejects_other_users_job(gpuq_env, tmp_queue_dir, userspace_module)
 def test_kill_unknown_job(gpuq_env):
     r = run(["kill", "12345"], gpuq_env)
     assert r.returncode != 0
-    assert "no running job" in r.stderr
+    assert "no running or queued job" in r.stderr
 
 
 def _write_four_gpus(write):

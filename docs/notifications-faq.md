@@ -18,8 +18,9 @@ The system sends these kinds of notifications:
 - **Job completion notifications (gpuq, email)**
 
   Sent by the foreground `gpuq submit` process when your job ends. The reason is
-  one of `completed` (exit code 0), `timed_out` (it exceeded its time limit), or
-  `failed` (it exited with a non-zero code).
+  one of `completed` (exit code 0), `timed_out` (it exceeded its time limit),
+  `killed` (it was ended by a signal, e.g. `gpuq kill`), or `failed` (it exited
+  with a non-zero code).
 
   Example subject: `[gpuq] job 1234 completed`.
 
@@ -132,7 +133,9 @@ Notifications can go to:
 - **Console / cron output**
 
   - gpuq is daemonless: there is no background process printing notifications.
-    `gpuq submit` runs your job in the foreground in your terminal; `gpuq audit`
+    `gpuq submit` runs your job in the foreground in your terminal and prints a
+    one-line summary when the job ends (runtime, GPUs, GPU-hours recorded, exit
+    code), plus a "time limit reached" notice if the limit fires; `gpuq audit`
     prints its breach summary to stdout each time it runs (typically from a cron
     job). If you want a persistent record of audit output, redirect it in your
     crontab.
@@ -169,17 +172,21 @@ so the account is the single source of truth.
 
 ## ❓ When are job completion notifications sent?
 
-`gpuq submit` emails the job owner when the job ends, with one of three reasons:
+`gpuq submit` emails the job owner when the job ends, with one of four reasons:
 
 - **completed**: the command exited with code 0.
 
 - **timed_out**: the job ran longer than its time limit (`-t/--time`, defaulting to
-  the config `max_job_time_hours`, default 24 hours) and was killed.
+  the config `max_job_time_hours`, default 24 hours) and was killed. gpuq also
+  prints a "time limit reached" notice in the submitting terminal.
+
+- **killed**: the command was ended by a signal — e.g. you ran `gpuq kill`, or the
+  submitting terminal closed and gpuq forwarded the hangup to the job.
 
 - **failed**: the command exited with a non-zero code.
 
 (There is no "killed by another user" notification — you can only kill your own
-jobs; see the kill section below.)
+jobs, so a `killed` notice always stems from your own action.)
 
 ## ❓ When are over-quota notifications sent?
 
@@ -285,6 +292,9 @@ For any file under a checked scratch directory (`/scratch/shared`, `/scratch/tem
   > the **retired** `gpu_queue.py` daemon and are **not** produced for current jobs —
   > do not rely on them.
 
+  For each past job's *metadata* (runtime, GPU-hours, exit code, end reason — not
+  its output), run `gpuq history`.
+
 - **`gpuq audit` output:**
 
   Audit prints its breach summary to stdout on each run. If audit runs from cron,
@@ -313,7 +323,10 @@ gpuq coordinates through files under `/var/lib/gpu_queue/` (group-writable by th
 
 - `jobs.json` — queued jobs
 - `running.json` — running jobs
-- `usage.jsonl` — the GPU-hour usage ledger (used for quotas)
+- `usage.jsonl` — the per-job usage ledger (runtime, GPU-hours, command, queue
+  wait, exit code, end reason — including synthetic `lost` records when a
+  supervisor dies, and `cancelled`/`rejected` records for abandoned or refused
+  submits); used for quotas and browsable with `gpuq history` / `gpuq quota`
 - `untracked_state.json` / `rebind_state.json` — the detectors' notification state
 - `.lock` — the coordination lock
 
@@ -345,8 +358,11 @@ untracked / rebind detectors, set `notify_untracked` / `notify_rebind` to
 `true`/`false` in the `audit` block. To verify what is active, run:
 
 ```bash
-gpuq config --show
+gpuq config
 ```
+
+(`gpuq config` is read-only — it shows the active settings. Writing a starter
+config file is the admin's `gpuq config init`.)
 
 (The disk-quota and scratch notifications are governed by their respective cron jobs
 and shell scripts, not by this config file.)
@@ -357,8 +373,10 @@ gpuq does not log notifications persistently. You can reconstruct history from:
 
 - Your own redirected job output / audit output (if you set up redirection).
 
-- The gpuq usage ledger `/var/lib/gpu_queue/usage.jsonl` (per-job runtime and
-  GPU-hours, useful for understanding quota/audit behavior).
+- The gpuq usage ledger `/var/lib/gpu_queue/usage.jsonl` — view it with
+  `gpuq history` (per-job runtime, GPU-hours, exit code, end reason) and
+  `gpuq quota` (rolling 7-day usage vs budget), useful for understanding
+  quota/audit behavior.
 
 - The scratch-cleanup log at `/var/log/scratch-cleanup.log`.
 

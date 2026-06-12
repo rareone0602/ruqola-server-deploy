@@ -50,7 +50,9 @@ scripts/              # admin scripts (user creation/deletion, quotas, scratch c
 gpuq status                                   # see GPU + queue state
 gpuq submit -g 1 -t 8 -- python train.py      # run a job on 1 GPU, 8h limit
 gpuq submit -g 1 --notify you@example.com -- python train.py   # + email on finish
-gpuq status | grep "$USER"                    # your jobs
+gpuq history                                  # your recent jobs (runtime, exit code)
+gpuq quota                                    # your 7-day GPU-hours vs budget
+gpuq kill --mine                              # stop/cancel all your jobs
 nvidia-smi -l 1                               # live GPU usage
 ```
 
