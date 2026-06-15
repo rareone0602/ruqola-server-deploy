@@ -87,6 +87,7 @@ and do **not** use the legacy `gpu_queue.py`.
    ```json
    {
      "max_job_time_hours": 24,
+     "max_job_time_hours_cap": 96,
      "max_memory_per_gpu_gb": 70,
      "default_min_free_gb": 16,
      "notification_email": {
@@ -112,14 +113,14 @@ and do **not** use the legacy `gpu_queue.py`.
        "notify_untracked": false,
        "untracked_min_memory_mb": 512,
        "untracked_grace_seconds": 120,
-       "untracked_grace_hours": 24,
-       "untracked_reminder_hours": 6,
+       "untracked_grace_hours": 8,
+       "untracked_reminder_hours": 4,
        "untracked_allowlist": [],
        "notify_rebind": false,
        "rebind_min_memory_mb": 512,
        "rebind_grace_seconds": 120,
-       "rebind_grace_hours": 24,
-       "rebind_reminder_hours": 6
+       "rebind_grace_hours": 8,
+       "rebind_reminder_hours": 4
      }
    }
    ```
@@ -291,8 +292,9 @@ What `gpuq submit` itself enforces (no background system is involved):
 - **Refuses to start a job** when no GPU meets the request (`-g N` GPUs each with
   `-m GB` free VRAM and utilization below the idle threshold) — pass `--queue` to
   wait instead of being rejected.
-- **Kills a job after its time limit** (`-t HOURS`, default 24h): the supervising
-  foreground process arms a timer and terminates the job when it expires.
+- **Kills a job after its time limit** (`-t HOURS`, default 24h, hard-capped at
+  96h / 4 days): the supervising foreground process arms a timer and terminates
+  the job when it expires.
 
 What `gpuq audit` enforces (scheduled from cron, see below):
 - **Flags resource hogs** — users holding **more than** `audit.max_gpus_per_user`
@@ -493,8 +495,8 @@ tracking it). It is **off by default**; enable it in the `audit` block:
     "notify_untracked": true,
     "untracked_min_memory_mb": 512,
     "untracked_grace_seconds": 120,
-    "untracked_grace_hours": 24,
-    "untracked_reminder_hours": 6,
+    "untracked_grace_hours": 8,
+    "untracked_reminder_hours": 4,
     "untracked_allowlist": ["serviceacct"]
   }
 }
@@ -579,8 +581,8 @@ like the untracked detector:
     "notify_rebind": true,
     "rebind_min_memory_mb": 512,
     "rebind_grace_seconds": 120,
-    "rebind_grace_hours": 24,
-    "rebind_reminder_hours": 6
+    "rebind_grace_hours": 8,
+    "rebind_reminder_hours": 4
   }
 }
 ```
@@ -629,7 +631,7 @@ pip install -r tests/requirements.txt
 pytest -q tests/
 ```
 
-148 tests; ~80s wall time. No GPU, no root, no network. (The untracked-job and
+155 tests; ~80s wall time. No GPU, no root, no network. (The untracked-job and
 rebind tests spawn a real same-user `sleep` to exercise the kill path, and skip
 if the test user is in the system allowlist, e.g. `root`.)
 

@@ -39,7 +39,7 @@ Our custom GPU queue system (`gpuq`) coordinates fair access to the server's 4 H
 ### Key Features
 
 - **~140 GiB memory per H200 NVL GPU** - Each card reports 143771 MiB (~141 GB); about ~564 GB total across the 4 GPUs. Massive memory for large models.
-- **Default 24-hour time limit** - The default `--time` is 24h; you can request more or less (it is a default, not a hard ceiling)
+- **Default 24-hour time limit** - The default `--time` is 24h; you can request more or less, up to a hard **96-hour (4-day) cap**
 - **Queue management** - With `--queue`, jobs wait for resources instead of being rejected
 - **Resource monitoring** - Real-time `gpuq status` plus periodic `gpuq audit` policy checks
 - **Flexible submission** - Pass the command after `--`, or as a single `--command "..."` string
@@ -172,11 +172,11 @@ gpuq submit -m 20 -- python small_model.py
 #### Time Limits
 
 `-t/--time HOURS` sets how long the job may run before `gpuq` kills it. The
-default is 24h (from the config); it is a **default, not a hard maximum** — you
-may request more. It must be **greater than zero** (there is no unlimited
-mode). When the limit fires, gpuq prints a `time limit reached` notice to your
-terminal before terminating the job, so a timeout is never confused with a
-crash.
+default is 24h (from the config). It must be **greater than zero** (there is no
+unlimited mode) and **may not exceed the 96-hour (4-day) wall-time cap** —
+`gpuq` rejects a larger `-t` at submit. When the limit fires, gpuq prints a
+`time limit reached` notice to your terminal before terminating the job, so a
+timeout is never confused with a crash.
 
 ```bash
 # Short experiment (1 hour)

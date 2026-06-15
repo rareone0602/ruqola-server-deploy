@@ -227,9 +227,9 @@ than `untracked_min_memory_mb`). For each offending process group it drives an e
 state machine:
 
 - **warn** — first detection; the user is told the process will be killed after its
-  grace deadline (`untracked_grace_hours`, default 24h from first detection).
+  grace deadline (`untracked_grace_hours`, default 8h from first detection).
 
-- **remind** — sent at most every `untracked_reminder_hours` (default 6h) while the
+- **remind** — sent at most every `untracked_reminder_hours` (default 4h) while the
   process is still untracked and before the deadline.
 
 - **overdue** — sent once past the grace deadline (subject ends `PAST DEADLINE`).
@@ -250,8 +250,8 @@ allocated card is reserved but idle — typically because the job overrode the d
 e.g. set its own `--gpu N` or reset `CUDA_VISIBLE_DEVICES`).
 
 `gpuq audit` drives the same lifecycle as the untracked detector
-(warn → remind → overdue → killed), using `rebind_grace_hours` (default 24h),
-`rebind_reminder_hours` (default 6h), and `rebind_grace_seconds` (default 120s).
+(warn → remind → overdue → killed), using `rebind_grace_hours` (default 8h),
+`rebind_reminder_hours` (default 4h), and `rebind_grace_seconds` (default 120s).
 Processes are killed only under `gpuq audit --enforce`.
 
 ## ❓ When are disk quota notifications sent?

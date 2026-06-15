@@ -1,5 +1,6 @@
 {
   "max_job_time_hours": 24,
+  "max_job_time_hours_cap": 96,
   "max_memory_per_gpu_gb": 70,
   "default_min_free_gb": 16,
   "notification_email": {
@@ -25,13 +26,13 @@
     "notify_untracked": false,
     "untracked_min_memory_mb": 512,
     "untracked_grace_seconds": 120,
-    "untracked_grace_hours": 24,
-    "untracked_reminder_hours": 6,
+    "untracked_grace_hours": 8,
+    "untracked_reminder_hours": 4,
     "untracked_allowlist": [],
     "notify_rebind": false,
     "rebind_min_memory_mb": 512,
     "rebind_grace_seconds": 120,
-    "rebind_grace_hours": 24,
-    "rebind_reminder_hours": 6
+    "rebind_grace_hours": 8,
+    "rebind_reminder_hours": 4
   }
 }
