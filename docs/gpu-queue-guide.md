@@ -244,10 +244,18 @@ gpuq submit -g 1 -m 35 -t 3 -- python extract_features.py --model vit_large
   and under 10% utilization.
 - Cards **you already own** — held by one of your own running jobs. You may
   **stack** more jobs onto your own cards. An owned card skips the utilization
-  check (your own job legitimately drives it up) but still needs a little free
-  VRAM (~2 GB) so you don't stack straight into an out-of-memory error.
+  check (your own job legitimately drives it up) but must still clear the **same
+  `-m` free-VRAM filter** you asked for — it needs `max(2 GB, your -m)` free — so
+  `-m` is honored when stacking too, and a 2 GB floor always guards against an
+  instant out-of-memory when `-m` is tiny.
 
 A GPU held by **another** user is **never** handed to you until it frees up.
+
+> **Want a genuinely *free* card instead of stacking onto your own?** Add `--queue`
+> with an `-m` larger than your busy card's current free VRAM (a free H200 NVL has
+> ~141 GB). Your own card won't clear the filter, so the job **waits** for a free
+> one rather than stacking. (Pinning a card you don't hold — `--devices <n>
+> --queue` — also waits.)
 
 - **Default picker:** `gpuq submit -g N` picks `N` GPUs, preferring **free** cards
   (chosen at random, to spread load across the box) and only stacking onto cards
