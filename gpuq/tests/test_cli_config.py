@@ -29,6 +29,25 @@ def test_config_init_writes_default_when_missing(gpuq_env, tmp_path):
     assert "audit" in data
 
 
+def test_config_init_template_carries_pressure_policy(gpuq_env, tmp_path):
+    """The starter template ships the tightened limits: 48h wall cap, per-user
+    3-card hard cap, quota hold, and the 4h/2h audit grace/reminder cadence."""
+    cfg = tmp_path / "fresh_config.json"
+    env = dict(gpuq_env)
+    env["GPUQ_CONFIG_FILE"] = str(cfg)
+    r = run(["config", "init"], env)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(cfg.read_text())
+    assert data["max_job_time_hours_cap"] == 48
+    assert data["max_gpus_per_user_hard"] == 3
+    assert data["quotas"]["delay_hours"] == 8
+    audit = data["audit"]
+    assert audit["untracked_grace_hours"] == 4
+    assert audit["untracked_reminder_hours"] == 2
+    assert audit["rebind_grace_hours"] == 4
+    assert audit["rebind_reminder_hours"] == 2
+
+
 def test_bare_config_is_read_only(gpuq_env, tmp_path):
     cfg = tmp_path / "fresh_config.json"
     env = dict(gpuq_env)

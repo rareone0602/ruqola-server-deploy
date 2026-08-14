@@ -629,18 +629,19 @@ current terminal (its stdout/stderr stay in your terminal — redirect to a file
 yourself if you want a log). It does not write per-job log files.
 
 ```bash
-# Submit a multi-GPU JAX job that uses all four H200 cards
+# Submit a multi-GPU JAX job on 3 H200 cards (the per-user maximum)
 gpuq submit \
-  --command "python train_jax_multi.py --num-devices=4 --model-parallel" \
-  --gpus 4 \           # claim 4 whole GPUs (the box has 4 x H200 NVL, ~141 GB each)
+  --command "python train_jax_multi.py --num-devices=3 --model-parallel" \
+  --gpus 3 \           # claim 3 whole GPUs (the per-user card cap; -g 4 is refused)
   --memory 100 \       # selection floor: only pick GPUs with >= 100 GB FREE VRAM
   --time 16            # max runtime in hours; the job is killed past this
 ```
 
 A few things worth knowing about these flags (per `gpuq` itself):
 
-- `--gpus N` claims `N` whole GPUs chosen at random among the free cards. Use
-  `--gpus 4` for all four; use a smaller number for a partial run.
+- `--gpus N` claims `N` whole GPUs chosen at random among the free cards. The
+  per-user cap on this host is **3 concurrent cards**, so `--gpus 4` is refused
+  at submit; use a smaller number for a partial run.
 - `--memory GB` is **not** a per-GPU reservation or a hard cap on your job — it
   is the *minimum free VRAM a candidate GPU must have to be selected* (an
   admission floor). `--memory 100` simply means "only schedule me on a GPU with

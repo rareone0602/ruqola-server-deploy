@@ -22,8 +22,10 @@ BF16/FP16 dense matmul tops out around **~836 TFLOP/s** empirically on this serv
 is the non-tensor CUDA-core number, not the headline throughput.
 
 Host basics: 256 logical CPUs, 755 GiB RAM, Ubuntu 24.04.4 LTS, GPU driver
-575.57.08, CUDA (driver) 12.9. "Use all GPUs" therefore means indices `0,1,2,3`
-(e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`, `gpuq submit -g 4`).
+575.57.08, CUDA (driver) 12.9. "All GPUs" therefore means indices `0,1,2,3`
+(e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`) — but note
+that gpuq caps each user at **3 concurrent cards**, so no single gpuq job can
+take all four (`gpuq submit -g 4` is refused; `-g 3` is the per-user maximum).
 
 # GPU Queue Management System Setup
 
@@ -87,9 +89,10 @@ and do **not** use the legacy `gpu_queue.py`.
    ```json
    {
      "max_job_time_hours": 24,
-     "max_job_time_hours_cap": 96,
+     "max_job_time_hours_cap": 48,
      "max_memory_per_gpu_gb": 70,
      "default_min_free_gb": 16,
+     "max_gpus_per_user_hard": 3,
      "notification_email": {
        "enabled": false,
        "smtp_server": "smtp.gmail.com",
@@ -105,6 +108,7 @@ and do **not** use the legacy `gpu_queue.py`.
      },
      "quotas": {
        "default_gpu_hours_per_week": 0,
+       "delay_hours": 8,
        "users": {}
      },
      "audit": {
@@ -113,14 +117,14 @@ and do **not** use the legacy `gpu_queue.py`.
        "notify_untracked": false,
        "untracked_min_memory_mb": 512,
        "untracked_grace_seconds": 120,
-       "untracked_grace_hours": 8,
-       "untracked_reminder_hours": 4,
+       "untracked_grace_hours": 4,
+       "untracked_reminder_hours": 2,
        "untracked_allowlist": [],
        "notify_rebind": false,
        "rebind_min_memory_mb": 512,
        "rebind_grace_seconds": 120,
-       "rebind_grace_hours": 8,
-       "rebind_reminder_hours": 4
+       "rebind_grace_hours": 4,
+       "rebind_reminder_hours": 2
      }
    }
    ```
@@ -292,9 +296,15 @@ What `gpuq submit` itself enforces (no background system is involved):
 - **Refuses to start a job** when no GPU meets the request (`-g N` GPUs each with
   `-m GB` free VRAM and utilization below the idle threshold) — pass `--queue` to
   wait instead of being rejected.
-- **Kills a job after its time limit** (`-t HOURS`, default 24h, hard-capped at
-  96h / 4 days): the supervising foreground process arms a timer and terminates
-  the job when it expires.
+- **Kills a job after its time limit** (`-t HOURS`; the default is the config's
+  `max_job_time_hours` — 48h on this host, 24h in the shipped template —
+  hard-capped at 48h / 2 days): the supervising foreground process arms a timer
+  and terminates the job when it expires.
+- **Caps concurrent cards per user** (`max_gpus_per_user_hard`, 0 = off): a user
+  at the cap can still submit, but new jobs stack onto cards they already hold
+  instead of claiming free ones, and a single job asking for more cards than the
+  cap is refused outright. Cards you share with another user count toward your
+  total. This is the *hard* companion to the warn-only `audit.max_gpus_per_user`.
 
 What `gpuq audit` enforces (scheduled from cron, see below):
 - **Flags resource hogs** — users holding **more than** `audit.max_gpus_per_user`
@@ -333,8 +343,14 @@ own** (held by one of your own running jobs) — you may stack more jobs on your
 cards. A GPU held by *another* user is never handed to you until it frees up.
 
 An owned card skips the 10%-utilization check (your own job legitimately drives it
-up) but still needs a little free VRAM (2 GB) so you don't stack straight into an
-out-of-memory error.
+up) but must still clear the **same `-m` free-VRAM filter** you asked for — it needs
+`max(2 GB, your -m)` free — so `-m` is honored when stacking too, and a 2 GB floor
+always guards against an instant out-of-memory when `-m` is tiny.
+
+To wait for a genuinely **free** card instead of stacking onto your own busy one,
+add `--queue` with an `-m` larger than that card's current free VRAM (a free H200
+NVL has ~141 GB) — your own card won't clear the filter, so the job waits for a
+free one. (Pinning a card you don't hold — `--devices <n> --queue` — also waits.)
 
 - **Default:** `gpuq submit -g N` picks N GPUs, preferring **free** cards (chosen
   at random, to spread load across the box) and only stacking onto cards you
@@ -380,7 +396,8 @@ pre-ledger-v2 lines are absorbed):
   via `gpuq kill`, or its waiting process died). Uses `at`/`wait_sec`; never
   quota-charged.
 - **`rejected`** — a submit refused outright (no free slot without `--queue`,
-  or pinned `--devices` unavailable). Records unmet demand — a user with low
+  pinned `--devices` unavailable, or the request was blocked by the per-user
+  card cap — reason `user_card_cap`). Records unmet demand — a user with low
   usage but many rejections is starved, not idle.
 
 Users read the ledger with `gpuq history` (`--all`, `--user U`, `--events` to
@@ -399,14 +416,16 @@ in the config file:
 {
   "quotas": {
     "default_gpu_hours_per_week": 168,
+    "delay_hours": 8,
     "users": { "alice": 250, "bob": 50 }
   }
 }
 ```
 
-A budget of `0` (or missing) means unlimited — which is the **current deployed
-state**: quotas are dormant while usage data is gathered, but everything below
-already works, and `gpuq quota` makes that explicit to users.
+A budget of `0` (or missing) means unlimited. `delay_hours` is the
+**over-quota hold**: how long an over-budget submit must wait after submission
+before it may claim any slot at all (0 or missing = no hold, deprioritization
+only).
 
 Charging is by **actual runtime × GPUs held**, recorded in the ledger at job
 end. The rolling window is exact: a job straddling the 7-day cutoff is only
@@ -418,15 +437,19 @@ the line.
 When a `gpuq submit` would push the user over budget, the job is **not
 rejected** — instead it is:
 
-1. Marked `priority: low` and forced into the queue (warning printed).
+1. Marked `priority: low` and forced into the queue (warning printed), and —
+   with `quotas.delay_hours` set — **held**: it may not claim a slot before
+   submit-time + that many hours. `gpuq status` shows the hold deadline on the
+   queued entry.
 2. Sent an email (if `notification_email` is enabled and the user has an email
-   on their account, read from GECOS).
+   on their account, read from GECOS), including the hold deadline.
 3. Polled at a longer interval (default 120s, override with
    `GPUQ_DEPRIORITIZED_POLL_SEC`) and made to yield to any normal-priority
    submitter waiting on the same host.
 
-Solo over-quota submitters still run eventually (after their first poll
-delay); contended ones wait until the normal-priority queue clears.
+Solo over-quota submitters still run eventually (once their hold expires and
+after their first poll delay); contended ones wait until the normal-priority
+queue clears.
 
 ### Checking usage (`gpuq quota`)
 
@@ -480,8 +503,11 @@ alerts use the existing `slack` / `notification_email` config blocks.
 Schedule it from any admin's user-cron:
 
 ```
-*/15 * * * * /home/admin/.local/bin/gpuq audit --quiet
+0 * * * * /home/admin/.local/bin/gpuq audit --quiet
 ```
+
+(Hourly matches the live schedule on this host; run it more often if you want
+faster detection.)
 
 ### Catching untracked GPU jobs
 
@@ -495,8 +521,8 @@ tracking it). It is **off by default**; enable it in the `audit` block:
     "notify_untracked": true,
     "untracked_min_memory_mb": 512,
     "untracked_grace_seconds": 120,
-    "untracked_grace_hours": 8,
-    "untracked_reminder_hours": 4,
+    "untracked_grace_hours": 4,
+    "untracked_reminder_hours": 2,
     "untracked_allowlist": ["serviceacct"]
   }
 }
@@ -551,7 +577,7 @@ goes away.
 root, so run the killing form from **root's** crontab:
 
 ```
-*/15 * * * * /usr/local/bin/gpuq audit --enforce --quiet
+0 * * * * /usr/local/bin/gpuq audit --enforce --quiet
 ```
 
 Run unprivileged, `--enforce` kills only your own processes and prints
@@ -581,8 +607,8 @@ like the untracked detector:
     "notify_rebind": true,
     "rebind_min_memory_mb": 512,
     "rebind_grace_seconds": 120,
-    "rebind_grace_hours": 8,
-    "rebind_reminder_hours": 4
+    "rebind_grace_hours": 4,
+    "rebind_reminder_hours": 2
   }
 }
 ```
@@ -631,7 +657,7 @@ pip install -r tests/requirements.txt
 pytest -q tests/
 ```
 
-155 tests; ~80s wall time. No GPU, no root, no network. (The untracked-job and
+181 tests; ~140s wall time. No GPU, no root, no network. (The untracked-job and
 rebind tests spawn a real same-user `sleep` to exercise the kill path, and skip
 if the test user is in the system allowlist, e.g. `root`.)
 

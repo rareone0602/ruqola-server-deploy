@@ -27,19 +27,20 @@ Our custom GPU queue system (`gpuq`) coordinates fair access to the server's 4 H
 - **Self-supervising time limits** - Each job's own `gpuq submit` process kills it when the time limit is reached
 - **Usage monitoring** - `gpuq status` shows who is using what, and `gpuq audit` (run on cron) reports resource hogs and policy breaches
 - **Job ledger** - Every job is logged; `gpuq history` shows how your past jobs ended and what they cost, `gpuq quota` shows your rolling 7-day GPU-hours
-- **Per-user quotas** - Rolling 7-day GPU-hour budgets keep one user from monopolizing the box over time (not yet enforced — usage is being recorded to set fair budgets)
+- **Per-user quotas** - A rolling 7-day budget of **168 GPU-hours** (one H200 running 24/7) keeps one user from monopolizing the box; going over never rejects your jobs, it delays and deprioritizes them (see [GPU-Hour Quotas](#gpu-hour-quotas))
+- **Per-user card caps** - You may hold at most **3 of the 4 GPUs** at once (hard cap); holding 3 already triggers an admin warning, so treat **2** as the courtesy ceiling
 - **Opt-in notifications** - Email alerts for job completion and policy issues
 
 > **gpuq is daemonless.** There is no background service. Each `gpuq submit` runs
 > your command **in the foreground** in your terminal; that same process supervises
 > the job and enforces its time limit. Server-side policy checks (resource hogs,
 > over-quota users, untracked/rebound GPU jobs) run periodically via `gpuq audit`
-> on cron — typically every 15 minutes — not from a live monitor.
+> on cron — hourly on this host — not from a live monitor.
 
 ### Key Features
 
 - **~140 GiB memory per H200 NVL GPU** - Each card reports 143771 MiB (~141 GB); about ~564 GB total across the 4 GPUs. Massive memory for large models.
-- **Default 24-hour time limit** - The default `--time` is 24h; you can request more or less, up to a hard **96-hour (4-day) cap**
+- **48-hour wall-time cap** - `--time` may not exceed **48 hours (2 days)**; on this host the default `--time` is also 48h, so pass a realistic smaller `-t` (it feeds the quota projection — see [GPU-Hour Quotas](#gpu-hour-quotas))
 - **Queue management** - With `--queue`, jobs wait for resources instead of being rejected
 - **Resource monitoring** - Real-time `gpuq status` plus periodic `gpuq audit` policy checks
 - **Flexible submission** - Pass the command after `--`, or as a single `--command "..."` string
@@ -64,7 +65,7 @@ gpuq status | grep "$USER"
 # Your recent jobs: runtime, GPU-hours, exit code, how they ended
 gpuq history
 
-# Your rolling 7-day GPU-hour usage (vs budget, once quotas are set)
+# Your rolling 7-day GPU-hour usage vs your 168 GPU-h weekly budget
 gpuq quota
 
 # Kill a running job — or cancel a queued one — by id
@@ -140,13 +141,21 @@ gpuq submit -g 1 -- python train.py
 # Multi-GPU training (2 GPUs)
 gpuq submit -g 2 -- torchrun --nproc_per_node=2 train.py
 
-# All four GPUs (only succeeds if all are free or already yours)
-gpuq submit -g 4 -- torchrun --nproc_per_node=4 multi_gpu_train.py
+# Three GPUs — the per-user maximum (and already past the 2-card courtesy
+# ceiling, so expect an admin warning; -g 4 is rejected outright)
+gpuq submit -g 3 -- torchrun --nproc_per_node=3 multi_gpu_train.py
 ```
 
 `-g/--gpus N` asks for `N` GPUs; `gpuq` picks them at random among the GPUs
 selectable for you (see [Choosing Which GPU](#choosing-which-gpu)). To pin exact
 indices, use `--devices` instead.
+
+> **Per-user card cap.** You may hold at most **3 distinct GPUs** at once,
+> across *all* your running jobs combined — a submit that would give you a 4th
+> card is refused, and a single `-g 4` job is rejected at submit. At the cap,
+> new submits automatically **stack onto cards you already hold** instead of
+> taking free ones. Holding 3 cards already trips the audit's soft warning
+> (threshold 2), so stay at 1–2 cards unless you really need the third.
 
 #### Memory Requirements (a selection filter, not a reservation)
 
@@ -171,12 +180,13 @@ gpuq submit -m 20 -- python small_model.py
 
 #### Time Limits
 
-`-t/--time HOURS` sets how long the job may run before `gpuq` kills it. The
-default is 24h (from the config). It must be **greater than zero** (there is no
-unlimited mode) and **may not exceed the 96-hour (4-day) wall-time cap** —
-`gpuq` rejects a larger `-t` at submit. When the limit fires, gpuq prints a
-`time limit reached` notice to your terminal before terminating the job, so a
-timeout is never confused with a crash.
+`-t/--time HOURS` sets how long the job may run before `gpuq` kills it. On this
+host the default is 48h (from the config). It must be **greater than zero**
+(there is no unlimited mode) and **may not exceed the 48-hour (2-day)
+wall-time cap** — `gpuq` rejects a larger `-t` at submit. Jobs that need longer
+must checkpoint and resubmit. When the limit fires, gpuq prints a `time limit
+reached` notice to your terminal before terminating the job, so a timeout is
+never confused with a crash.
 
 ```bash
 # Short experiment (1 hour)
@@ -185,9 +195,14 @@ gpuq submit -t 1 -- python quick_test.py
 # Medium training (8 hours)
 gpuq submit -t 8 -- python train.py
 
-# Long training (48 hours)
+# Longest possible run (48 hours — the cap)
 gpuq submit -t 48 -- python long_train.py
 ```
+
+> Passing a realistic `-t` matters beyond the kill timer: the quota gate
+> projects `GPUs × -t` GPU-hours at submit, so leaving the 48h default on a
+> 2-hour job can get you needlessly deprioritized when you are near your
+> weekly budget.
 
 > Because `gpuq` is daemonless, the time limit is enforced by the **foreground
 > `gpuq submit` process itself** (a timer inside it). Closing your terminal
@@ -276,9 +291,13 @@ gpuq submit --devices 1,3 --queue -- python y.py # wait for exactly GPU 1 and 3
 > **`gpuq` sets `CUDA_VISIBLE_DEVICES` for you** to the GPU(s) it allocated. Do
 > **not** override it (and do not pass a hard-coded `--gpu N` / `device=N` to your
 > script), or your job will run on a card it wasn't allocated — leaving the
-> allocated card reserved-but-idle. The `gpuq audit` **rebind detector** flags
-> this (warn → remind → overdue → kill, with kill only under `--enforce`). If you
-> want a specific card, pin it with `--devices`.
+> allocated card reserved-but-idle. Note that an inline
+> `CUDA_VISIBLE_DEVICES=0` in your command means **physical** GPU 0, not "my
+> first allocated GPU" — inside a gpuq job your allocated card is already
+> device 0. The `gpuq audit` **rebind detector** catches this: you get a
+> warning email at detection, reminders every **2 hours**, and the process is
+> **killed 4 hours** after first detection if not fixed. If you want a
+> specific card, pin it with `--devices`.
 
 ## Monitoring and Management
 
@@ -389,12 +408,13 @@ more digging through redirected logs to find out *whether* something ran.
 
 ## GPU-Hour Quotas
 
-`gpuq` enforces a **rolling 7-day GPU-hour budget** per user (set by the admin in
-the config). A budget of `0` or missing means **unlimited** — which is the
-**current state**: quotas are not enforced yet, while usage data is collected
-to set fair budgets. Charging is by **actual runtime × GPUs held**, recorded
-when each job ends (jobs straddling the 7-day cutoff are only charged for the
-in-window portion, and running jobs count at their current elapsed time).
+`gpuq` enforces a **rolling 7-day GPU-hour budget** per user. On this host the
+budget is **168 GPU-hours per week** — exactly one H200 running around the
+clock. It was set from ten weeks of real usage: no user's *median* week comes
+near it, so it only bites in outlier weeks. Charging is by **actual runtime ×
+GPUs held**, recorded when each job ends (jobs straddling the 7-day cutoff are
+only charged for the in-window portion, and running jobs count at their
+current elapsed time).
 
 Check where you stand at any time:
 
@@ -403,23 +423,26 @@ gpuq quota          # your usage: finished + running, budget, headroom
 gpuq quota --all    # one row per user + host capacity utilisation
 ```
 
-While budgets are unset, `gpuq quota` reports your usage with an explicit
-"quotas are not enforced yet" note, and the `gpuq status` footer shows your
-7-day total after every status check.
+The `gpuq status` footer also shows your 7-day total after every status check.
 
-When budgets are active and a `gpuq submit` would push you over, the job is
-**not rejected** — instead it is **deprioritized**:
+When a `gpuq submit` would push you over budget, the job is **never
+rejected** — instead it is **held, then deprioritized**:
 
-1. Marked low-priority and forced into the queue (a warning is printed).
-2. You are emailed once (if notifications are enabled and your account has an
-   email).
-3. Polled at a longer interval and made to yield to any normal-priority submitter
-   waiting on the same host.
+1. **Held for 8 hours** from submission: it may not start at all before then.
+   The hold deadline is printed at submit, emailed to you, and shown on the
+   queued entry in `gpuq status`.
+2. Marked low-priority and forced into the queue; after the hold it only
+   starts when a slot is free **and** no on-quota submitter who could take it
+   is waiting.
+3. Polled at a longer interval (120s) while it waits.
 
-A solo over-quota submit still runs eventually (after its first poll delay); a
-contended one waits until the normal-priority queue clears. Pinning GPUs with
-`--devices` does **not** skip the quota gate — it chooses *which* card you
-get, not *whether* you wait like everyone else.
+The gate compares `used + GPUs × -t` against your budget, so **pass a
+realistic `-t`** — a 2-hour job submitted with the 48h default projects 48
+GPU-hours and can be held unnecessarily. A solo over-quota submit still runs
+once its hold expires; a contended one also waits for the normal-priority
+queue to clear. Pinning GPUs with `--devices` does **not** skip the quota
+gate — it chooses *which* card you get, not *whether* you wait like everyone
+else.
 
 ## Advanced Usage
 
@@ -523,14 +546,17 @@ be enforced and for output to be captured. Options:
    # Good: specific, modest requirements
    gpuq submit -g 1 -m 30 -t 8 -- python train.py
 
-   # Avoid: grabbing all four GPUs and a giant time window for a small job
-   gpuq submit -g 4 -m 120 -t 48 -- python train.py
+   # Avoid: maxing out cards and the time window for a small job
+   # (this trips the audit's 2-card warning AND projects 144 GPU-hours
+   # against your weekly quota)
+   gpuq submit -g 3 -m 120 -t 48 -- python train.py
    ```
 
-2. **Use appropriate time limits**:
+2. **Use appropriate time limits** (`-t` also feeds the quota projection):
    - Quick tests: 1-2 hours
    - Medium experiments: 4-8 hours
-   - Long training: 12-48 hours
+   - Long training: 12-48 hours (48h is the hard cap — checkpoint and
+     resubmit for anything longer)
 
 3. **Mind your quota**: GPU-hours are charged as runtime × GPUs; check
    `gpuq quota` (and `gpuq history` for what past jobs cost) and avoid holding
@@ -677,10 +703,14 @@ gpuq status
 #    applies — the rejection message tells you the number it used.)
 # 3. --devices pinned a GPU held by someone else (rejected immediately
 #    unless you also pass --queue).
-# 4. The request fails validation: -t must be > 0, -g must fit the host's
-#    GPU count, --devices indices must exist, and -g must match --devices.
-#    These are rejected with a specific message before anything is queued.
-# 5. You are over your GPU-hour quota — the job is deprioritized, not rejected.
+# 4. The request fails validation: -t must be > 0 and <= 48, -g must fit the
+#    host's GPU count AND the 3-card per-user cap, --devices indices must
+#    exist, and -g must match --devices. Rejected with a specific message.
+# 5. The per-user card cap: you already hold 3 cards (or the pin would give
+#    you a 4th). The message names the cap; new submits can still stack onto
+#    your own cards.
+# 6. You are over your GPU-hour quota — the job is held 8h and deprioritized,
+#    never rejected.
 
 # Debugging smoke test
 gpuq submit -g 1 -t 1 -- echo "Test job"

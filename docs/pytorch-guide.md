@@ -62,7 +62,7 @@ Add to your `~/.bashrc` or job submission script:
 
 ```bash
 # CUDA environment variables for H200
-export CUDA_VISIBLE_DEVICES=0  # Use first GPU, or 0,1,2,3 for all 4
+export CUDA_VISIBLE_DEVICES=0  # outside gpuq only — `gpuq submit` sets this for you
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 ```
@@ -399,9 +399,9 @@ def train_ddp(rank, world_size):
 
 # Launch with torchrun; --nproc_per_node must equal the number of GPUs you were
 # allocated (gpuq sets CUDA_VISIBLE_DEVICES for you) and match the --gpus value you
-# passed to `gpuq submit`. Max 4 on this server.
+# passed to `gpuq submit`. Max 3 per user on this server (the concurrent-card cap).
 # torchrun --nproc_per_node=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .) train_script.py
-# (or just set it to your --gpus value, e.g. --nproc_per_node=4 for the full node)
+# (or just set it to your --gpus value, e.g. --nproc_per_node=3 at the cap)
 ```
 
 ### GPU Queue Multi-GPU Job
@@ -416,10 +416,11 @@ gpuq submit \
   --memory 60 \
   --time 12
 
-# To use the whole node (all 4 H200s):
+# The largest single job possible: 3 GPUs (the per-user card cap; -g 4 is
+# rejected at submit, and holding 3 already triggers the admin warning):
 gpuq submit \
-  --command "torchrun --nproc_per_node=4 train_distributed.py" \
-  --gpus 4 \
+  --command "torchrun --nproc_per_node=3 train_distributed.py" \
+  --gpus 3 \
   --memory 60 \
   --time 12
 ```

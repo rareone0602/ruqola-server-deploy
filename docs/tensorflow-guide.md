@@ -39,7 +39,8 @@ The H200 reports compute capability **9.0** (Hopper, `sm_90`). Any reasonably cu
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0      # Use first H200, or 0,1,2,3 for all four H200s
+export CUDA_VISIBLE_DEVICES=0      # outside gpuq only — `gpuq submit` sets this for
+                                   # you; overriding it triggers the rebind detector
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
@@ -480,14 +481,15 @@ def multi_gpu_training():
 ### Multi-GPU Job Submission
 
 ```bash
-# Submit a 4-GPU TensorFlow job (uses all four H200s).
+# Submit a 3-GPU TensorFlow job (3 is the per-user maximum — `-g 4` is
+# refused by the queue's concurrent-card cap).
 # -m/--memory is the MINIMUM free VRAM (GB) a candidate GPU must have to be
 # picked — it is an admission requirement, not a hard cap or reservation.
 # The job runs in the FOREGROUND in this terminal; redirect output yourself
 # if you want a log file.
 gpuq submit \
   --command "python train_tensorflow.py --strategy=mirrored" \
-  --gpus 4 \
+  --gpus 3 \
   --memory 40 \
   --time 12
 
@@ -543,8 +545,8 @@ model = LargeTransformer(vocab_size=50000)
 ```
 
 With ~141 GB of VRAM per H200, a single card holds substantial models; use
-`MirroredStrategy` across the 4 GPUs (or model parallelism) only when one card is
-not enough.
+`MirroredStrategy` across up to 3 GPUs (the per-user card cap), or model
+parallelism, only when one card is not enough.
 
 ### Hugging Face Transformers with TensorFlow
 

@@ -28,7 +28,7 @@ A quick reference for the live Ruqola server (host `wsserver1`, the NTU "Mjolnir
 | **System RAM** | 755 GiB |
 | **Operating system** | Ubuntu 24.04.4 LTS |
 
-> A 4th GPU was added on 2025-06-10. The server now has **exactly 4 GPUs**; older docs that say "3" are out of date. When you want to use every card, address indices `0,1,2,3` (e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`, `gpuq submit -g 4`).
+> A 4th GPU was added on 2025-06-10. The server now has **exactly 4 GPUs**; older docs that say "3" are out of date. The hardware indices are `0,1,2,3` — but note that gpuq caps each user at **3 concurrent cards**, so no single user can claim all four through the queue (`gpuq submit -g 4` is refused; `-g 3` is the per-user maximum).
 
 ## Hardware Specifications
 
@@ -355,7 +355,7 @@ dataloader = torch.utils.data.DataLoader(
 # Sizes are approximate fp16 weight footprints; TRAINING needs much more
 # (optimizer state + activations), so treat these as inference/loading guides.
 models_by_memory = {
-    "GPT-3 175B": "~350 GB",          # Needs multi-GPU model parallelism (use all 4 cards)
+    "GPT-3 175B": "~350 GB",          # Needs multi-GPU model parallelism (3 cards = ~423 GB, the per-user max)
     "LLaMA 65B": "~130 GB fp16",      # Tight on one ~141 GB card for inference; no room to train
     "Stable Diffusion XL": "~12 GB",  # Much headroom for batch size
     "BERT Large": "~1.3 GB",          # Can run huge batch sizes
@@ -371,10 +371,11 @@ models_by_memory = {
    # A 70B model in fp16 is ~140 GB of weights ALONE, which does not leave
    # room on one ~141 GB card for activations/optimizer state. For ~70B:
    #   - inference: shard across multiple cards, or use 4-bit/8-bit quantization
-   #   - training/finetuning: multi-GPU (this server has 4 cards) and/or quantization+offload
+   #   - training/finetuning: multi-GPU (up to 3 cards per user here) and/or quantization+offload
    from transformers import AutoModelForCausalLM
 
-   # Multi-GPU inference example (shards across all 4 cards):
+   # Multi-GPU inference example (shards across the cards gpuq allocated you,
+   # up to the 3-card per-user cap):
    model = AutoModelForCausalLM.from_pretrained(
        "meta-llama/Llama-2-70b-hf",
        torch_dtype=torch.float16,

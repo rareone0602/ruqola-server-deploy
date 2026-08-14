@@ -45,7 +45,8 @@ python -c "from transformers import pipeline; print('Transformers ready!')"
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0,1,2,3  # Use all 4 H200s
+export CUDA_VISIBLE_DEVICES=0,1      # outside gpuq only — `gpuq submit` sets this
+                                     # for you (and caps each user at 3 cards)
 export HF_HOME="/path/to/shared/hf"  # Shared HF cache (models + datasets)
 export HF_DATASETS_CACHE="/path/to/shared/datasets"  # Optional: separate datasets cache
 export TOKENIZERS_PARALLELISM=false  # Avoid multiprocessing issues
@@ -594,7 +595,7 @@ def train_with_accelerate(model_name, dataset, config):
     )
 ```
 
-> For data-parallel runs (one full model replica per GPU), launch with `torchrun --nproc_per_node=4 train.py` to use all four H200s.
+> For data-parallel runs (one full model replica per GPU), launch with `torchrun --nproc_per_node=N train.py` where `N` matches your gpuq allocation (at most 3 cards per user on this host).
 
 ### Multi-GPU Inference
 

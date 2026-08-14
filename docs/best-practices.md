@@ -26,8 +26,10 @@ already hold. Just don't camp on GPUs you aren't using.
 # ✅ GOOD: Request what your job needs
 gpuq submit --command "python train.py" --gpus 1 --memory 40 --time 8
 
-# ✅ ALSO FINE: A multi-GPU job that genuinely uses all 4 cards
-gpuq submit --command "torchrun --nproc_per_node=4 train.py" --gpus 4 --time 12
+# ✅ ALSO FINE: A multi-GPU job that genuinely needs several cards
+# (3 is the per-user maximum — `-g 4` is refused — and holding 3 already
+# trips the admin warning, so treat 2 as the courtesy ceiling)
+gpuq submit --command "torchrun --nproc_per_node=2 train.py" --gpus 2 --time 12
 
 # ❌ BAD: Holding GPUs you don't need, then leaving them idle
 #         (or queueing duplicate jobs you'll never look at)
@@ -336,7 +338,8 @@ def profile_memory_usage():
 
 #### Large Models (10B+ parameters)
 - Use DeepSpeed ZeRO Stage 2/3
-- Model parallelism across multiple GPUs (up to all 4 on this host)
+- Model parallelism across multiple GPUs (up to 3 on this host — the per-user
+  card cap; see the [GPU queue guide](gpu-queue-guide.md#gpu-requirements))
 - Offload optimizer states to CPU (the host has 755 GiB RAM)
 
 ## Common Issues and Solutions
@@ -567,7 +570,8 @@ for gpu in gpus:
 dataset = dataset.prefetch(tf.data.AUTOTUNE)
 dataset = dataset.cache()  # If dataset fits in memory
 
-# 5. Use distribution strategies (use all 4 GPUs)
+# 5. Use distribution strategies (across the GPUs gpuq allocated you —
+#    at most 3 under the per-user card cap)
 strategy = tf.distribute.MirroredStrategy()
 with strategy.scope():
     model = create_model()

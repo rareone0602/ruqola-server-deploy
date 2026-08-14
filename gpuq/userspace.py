@@ -65,6 +65,7 @@ CONFIG_FILE = Path(os.environ.get("GPUQ_CONFIG_FILE", "/usr/local/bin/gpu_queue_
 NVSMI_BIN = os.environ.get("GPUQ_NVSMI", "nvidia-smi")
 
 DEFAULT_MAX_TIME_HOURS = 24
+DEFAULT_MAX_TIME_HOURS_CAP = 48    # hard wall-time ceiling = 2 days (config: max_job_time_hours_cap)
 DEFAULT_MAX_MEMORY_GB = 70
 GPU_UTIL_AVAILABLE_THRESHOLD = 10  # percent; below this, GPU counts as idle
 GPU_OWN_MIN_FREE_GB = 2            # owned-GPU stacking still needs this much free VRAM
@@ -744,6 +745,45 @@ def would_exceed_quota(user, requested_gpu_hours, config):
     return (used + requested_gpu_hours) > budget, used, budget
 
 
+def quota_delay_hours(config):
+    """Hours an over-quota submit is HELD before it may claim any slot (the
+    deprioritized low-priority queue applies after the hold). 0 = no hold.
+    Misconfigured values fail OFF, loudly: a hand-edited live config must
+    never silently change policy (JSON true would otherwise become a 1h hold).
+    """
+    q = config.get("quotas", {}) or {}
+    raw = q.get("delay_hours")
+    if isinstance(raw, bool):
+        print(f"warning: quotas.delay_hours must be a number, got {raw!r}; "
+              "treating the hold as off.", file=sys.stderr)
+        return 0.0
+    try:
+        v = float(raw or 0)
+    except (TypeError, ValueError):
+        print(f"warning: quotas.delay_hours is not a number ({raw!r}); "
+              "treating the hold as off.", file=sys.stderr)
+        return 0.0
+    return v if v > 0 else 0.0
+
+
+def user_card_cap(config):
+    """Per-user concurrent-card hard cap (max_gpus_per_user_hard); 0 = off.
+    Misconfigured values fail OFF, loudly: JSON true would otherwise become
+    int(True) == a silent cap of ONE card for every user on the host."""
+    raw = config.get("max_gpus_per_user_hard", 0)
+    if isinstance(raw, bool):
+        print(f"warning: max_gpus_per_user_hard must be a number, got {raw!r}; "
+              "treating the cap as off.", file=sys.stderr)
+        return 0
+    try:
+        v = int(raw or 0)
+    except (TypeError, ValueError):
+        print(f"warning: max_gpus_per_user_hard is not a number ({raw!r}); "
+              "treating the cap as off.", file=sys.stderr)
+        return 0
+    return v if v > 0 else 0
+
+
 # ---------------------------------------------------------------------------
 # GPU slot picking (ownership-aware)
 # ---------------------------------------------------------------------------
@@ -771,9 +811,11 @@ def free_gpus(want_memory_gb, gpus, running_jobs, user):
     Two kinds qualify: GPUs in no running job that have >= want_memory_gb free
     VRAM and utilization below the idle threshold, PLUS GPUs `user` already owns
     ("you own your allocated GPU" — stacking). An owned GPU skips the utilization
-    gate (the user's own job legitimately drives util up) but still needs a small
-    VRAM headroom (GPU_OWN_MIN_FREE_GB) so we don't green-light a doomed-OOM
-    stack. GPUs held by other users are never selectable."""
+    gate (the user's own job legitimately drives util up) but must still clear the
+    SAME free-VRAM admission filter the submitter asked for — at least
+    max(GPU_OWN_MIN_FREE_GB, want_memory_gb) free — so an explicit -m is honored
+    when stacking too, and a small floor always guards against a doomed-OOM stack
+    when -m is tiny. GPUs held by other users are never selectable."""
     want_mem_mb = want_memory_gb * 1024
     own_min_mb = GPU_OWN_MIN_FREE_GB * 1024
     owned, others = _gpu_owner_sets(running_jobs, user)
@@ -783,7 +825,7 @@ def free_gpus(want_memory_gb, gpus, running_jobs, user):
         if idx in others:
             continue
         if idx in owned:
-            if g["memory_free_mb"] >= own_min_mb:
+            if g["memory_free_mb"] >= max(own_min_mb, want_mem_mb):
                 out.append(idx)
         elif (g["memory_free_mb"] >= want_mem_mb
                 and g["utilization"] < GPU_UTIL_AVAILABLE_THRESHOLD):
@@ -791,7 +833,21 @@ def free_gpus(want_memory_gb, gpus, running_jobs, user):
     return sorted(out)
 
 
-def pick_gpus(want_count, want_memory_gb, gpus, running_jobs, user, devices=None):
+def _user_held_gpus(running_jobs, user):
+    """Distinct GPU indices `user`'s running jobs occupy on this host. Includes
+    cards co-tenanted with another user: they count toward the user's
+    concurrent-card cap even though they are not stackable."""
+    held = set()
+    for j in running_jobs:
+        if j.get("host", HOST) != HOST or j.get("user") != user:
+            continue
+        for gi in j.get("gpus", []):
+            held.add(int(gi))
+    return held
+
+
+def pick_gpus(want_count, want_memory_gb, gpus, running_jobs, user, devices=None,
+              hard_cap=0):
     """Choose GPU indices to run on, or None if the request can't be met now.
 
     With `devices`, pin exactly those indices — all must be selectable for `user`
@@ -799,28 +855,48 @@ def pick_gpus(want_count, want_memory_gb, gpus, running_jobs, user, devices=None
     among the selectable GPUs, preferring FREE GPUs over ones the user already
     owns so load spreads across the box before stacking; the free choice is
     random (as before) to avoid always starting at GPU 0.
+
+    With hard_cap > 0, the pick may never leave `user` holding more than
+    hard_cap DISTINCT cards on this host: new-card claims are limited to the
+    remaining headroom, the rest of the request redirects onto cards they
+    already own (stacking), and a request that cannot fit returns None.
     """
     free = free_gpus(want_memory_gb, gpus, running_jobs, user)
+    held = _user_held_gpus(running_jobs, user) if hard_cap > 0 else set()
     if devices is not None:
         want = sorted(set(devices))
+        # Charge only NEW cards against the headroom, like the default path:
+        # a user already over the cap (cards claimed before it was enabled or
+        # lowered) may still pin cards they hold — that is stacking, the exact
+        # behavior the cap redirects everyone toward.
+        if hard_cap > 0 and (len(set(want) - held)
+                             > max(0, hard_cap - len(held))):
+            return None
         return want if all(d in free for d in want) else None
-    if len(free) < want_count:
-        return None
     owned, _ = _gpu_owner_sets(running_jobs, user)
     free_only = [i for i in free if i not in owned]
-    if len(free_only) >= want_count:
-        return sorted(random.sample(free_only, want_count))
     owned_sel = [i for i in free if i in owned]
-    topup = random.sample(owned_sel, want_count - len(free_only))
-    return sorted(free_only + topup)
+    take_free = min(want_count, len(free_only))
+    if hard_cap > 0:
+        take_free = min(take_free, max(0, hard_cap - len(held)))
+    topup = want_count - take_free
+    if topup > len(owned_sel):
+        return None
+    picked = random.sample(free_only, take_free) if take_free else []
+    if topup:
+        picked += random.sample(owned_sel, topup)
+    return sorted(picked)
 
 
-def gpu_unavailability(devices, gpus, running_jobs, want_memory_gb, user):
+def gpu_unavailability(devices, gpus, running_jobs, want_memory_gb, user,
+                       hard_cap=0):
     """Human-readable reason each pinned GPU can't be used by `user`; [] means all
     usable. Mirrors free_gpus/pick_gpus exactly so a reason never contradicts the
-    picker: a GPU `user` owns is usable while it keeps GPU_OWN_MIN_FREE_GB of
-    headroom (util ignored); a GPU held by another user is reported as held; a
-    free GPU uses the normal util/VRAM gates."""
+    picker: a GPU `user` owns is usable while it keeps max(GPU_OWN_MIN_FREE_GB,
+    want_memory_gb) free (util ignored, so an explicit -m is honored when
+    stacking); a GPU held by another user is reported as held; a free GPU uses the
+    normal util/VRAM gates; with hard_cap set, a pin whose NEW cards exceed the
+    user's remaining card-cap headroom gets a request-level cap reason."""
     want_mem_mb = want_memory_gb * 1024
     own_min_mb = GPU_OWN_MIN_FREE_GB * 1024
     by_idx = {g["index"]: g for g in gpus}
@@ -840,16 +916,43 @@ def gpu_unavailability(devices, gpus, running_jobs, want_memory_gb, user):
             j = held.get(d, {})
             reasons.append(f"GPU {d}: held by gpuq job {j.get('id')} ({j.get('user')})")
         elif d in owned:
-            if g["memory_free_mb"] < own_min_mb:
+            need_mb = max(own_min_mb, want_mem_mb)
+            if g["memory_free_mb"] < need_mb:
                 reasons.append(f"GPU {d}: only {g['memory_free_mb'] // 1024} GB free, "
-                               f"can't safely stack (need >= {GPU_OWN_MIN_FREE_GB} GB "
-                               f"headroom)")
+                               f"need {need_mb // 1024} GB to stack on your own card")
         elif g["utilization"] >= GPU_UTIL_AVAILABLE_THRESHOLD:
             reasons.append(f"GPU {d}: in use ({g['utilization']}% util)")
         elif g["memory_free_mb"] < want_mem_mb:
             reasons.append(f"GPU {d}: only {g['memory_free_mb'] // 1024} GB free "
                            f"(need {want_memory_gb} GB)")
+    if hard_cap > 0:
+        held = _user_held_gpus(running_jobs, user)
+        new = sorted(set(devices) - held)
+        if len(new) > max(0, hard_cap - len(held)):
+            reasons.append(
+                f"per-user card cap: you hold {len(held)} card(s) "
+                f"{sorted(held)} of the {hard_cap}-card cap; pinning "
+                f"{len(new)} new card(s) {new} exceeds it")
     return reasons
+
+
+def _normal_waiter_can_claim(queued, running_jobs, gpus, hard_cap):
+    """Could any normal-priority waiter queued on this host claim a slot right
+    now? Deprioritized submitters yield only to waiters who actually can: a
+    normal waiter wedged by the per-user card cap (or VRAM/pinning) must not
+    starve low-priority jobs forever while a card sits idle."""
+    for j in queued:
+        if j.get("priority", "normal") != "normal" or j.get("host") != HOST:
+            continue
+        try:
+            want = int(j.get("gpu_count") or 1)
+            mem = float(j.get("memory_gb") or 0)
+        except (TypeError, ValueError):
+            return True   # unparseable entry: be conservative and yield
+        if pick_gpus(want, mem, gpus, running_jobs, j.get("user"),
+                     devices=j.get("devices"), hard_cap=hard_cap) is not None:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -908,20 +1011,29 @@ def email_for_user(user):
 
 
 def notify_quota_exceeded(user, notify_email, used_hours, requested_hours, budget,
-                          config):
-    """Email the user that their submit was deprioritized for going over quota."""
+                          config, hold_until=None):
+    """Email the user that their submit was deprioritized for going over quota
+    (and held until `hold_until`, when the admin configured a quota hold)."""
     if not notify_email:
         notify_email = email_for_user(user)
     if not notify_email:
         return
     subject = f"[gpuq] {user}: GPU-hour quota exceeded - job deprioritized"
+    hold_note = ""
+    if hold_until is not None:
+        hold_note = (f"Held until:                      "
+                     f"{hold_until.isoformat(timespec='minutes')}\n")
     body = (
         f"Host: {HOST}\n"
         f"User: {user}\n"
         f"Used in last {QUOTA_WINDOW_HOURS}h: {used_hours:.1f} GPU-hours\n"
         f"Requested by this job:           {requested_hours:.1f} GPU-hours\n"
-        f"Rolling 7-day budget:            {budget:.1f} GPU-hours\n\n"
-        "Your job was queued at low priority. It will only run once on-quota\n"
+        f"Rolling 7-day budget:            {budget:.1f} GPU-hours\n"
+        f"{hold_note}\n"
+        "Your job was queued at low priority"
+        + (", and is held until the time\nabove before it may start at all"
+           if hold_until is not None else "")
+        + ". It will only run once on-quota\n"
         "submitters on this host have had a chance to grab the next free slot.\n"
         "If this is unexpected, ask the admin to adjust your quota.\n"
     )
@@ -1169,14 +1281,15 @@ def _drop_my_queued_entry(queued):
 
 
 def _try_claim(cmd, args, memory_gb, max_time_hours, devices=None,
-               deprioritized=False, submitted_at=None):
+               deprioritized=False, submitted_at=None, hard_cap=0):
     """One attempt, under the lock, to grab a slot. Returns (job, picked) on
     success or (None, None). Reaps stale jobs first and drops our own queued
     entry when we win, so a waiter that finally claims also leaves the queue."""
     with file_lock(LOCK_FILE):
         running, queued = reap_all_locked()
         gpus = get_gpu_info()
-        picked = pick_gpus(args.gpus, memory_gb, gpus, running, USER, devices=devices)
+        picked = pick_gpus(args.gpus, memory_gb, gpus, running, USER,
+                           devices=devices, hard_cap=hard_cap)
         if picked is None:
             return None, None
         job = build_running_job(cmd, args, picked, memory_gb, max_time_hours,
@@ -1193,13 +1306,15 @@ def _try_claim(cmd, args, memory_gb, max_time_hours, devices=None,
 
 
 def _wait_for_slot(cmd, args, memory_gb, max_time_hours, config, devices=None,
-                   deprioritized=False, submitted_at=None):
+                   deprioritized=False, submitted_at=None, hard_cap=0,
+                   hold_until=None):
     """Poll until a slot can be claimed, returning (job, picked). Registers a
     one-time queued entry so other submitters see us and yield as configured;
     the job keeps the queued entry's id when it finally runs. Ctrl-C, SIGTERM
     and SIGHUP (closed terminal) all drop that entry, log a cancelled event,
     and exit with the conventional code. Used by --queue submits (with
-    `devices` pinned or not) and by deprioritized over-quota submits."""
+    `devices` pinned or not) and by deprioritized over-quota submits, which
+    additionally may not claim before `hold_until` (the over-quota hold)."""
     poll_interval = (DEPRIORITIZED_POLL_INTERVAL_SEC if deprioritized
                      else QUEUE_POLL_INTERVAL_SEC)
     qjob = None
@@ -1250,19 +1365,24 @@ def _wait_for_slot(cmd, args, memory_gb, max_time_hours, config, devices=None,
         while True:
             with file_lock(LOCK_FILE):
                 running, queued = reap_all_locked()
-                normal_waiting = any(
-                    j.get("priority", "normal") == "normal"
-                    and j.get("host") == HOST
-                    for j in queued
-                )
                 # Deprioritized submitters always queue on the first iteration
                 # (giving any concurrent normal-priority submit time to land),
-                # and keep yielding while a normal-priority submitter is queued.
-                skip_pick = deprioritized and (first_iter or normal_waiting)
+                # never claim before their over-quota hold expires, and yield
+                # while a normal-priority submitter is queued — but only to
+                # waiters who could actually claim a slot right now: a normal
+                # waiter wedged by the card cap (or VRAM/pinning) must not
+                # starve low-priority jobs while a card sits idle.
+                skip_pick = deprioritized and (
+                    first_iter
+                    or (hold_until is not None and datetime.now() < hold_until))
                 if not skip_pick:
                     gpus = get_gpu_info()
+                    if deprioritized and _normal_waiter_can_claim(
+                            queued, running, gpus, hard_cap):
+                        skip_pick = True
+                if not skip_pick:
                     picked = pick_gpus(args.gpus, memory_gb, gpus, running, USER,
-                                       devices=devices)
+                                       devices=devices, hard_cap=hard_cap)
                     if picked is not None:
                         job = build_running_job(
                             cmd, args, picked, memory_gb, max_time_hours,
@@ -1288,9 +1408,15 @@ def _wait_for_slot(cmd, args, memory_gb, max_time_hours, config, devices=None,
                                             priority=priority,
                                             submitted_at=submitted_at,
                                             devices=devices)
+                    if hold_until is not None:
+                        qjob["hold_until"] = hold_until.isoformat(
+                            timespec="seconds")
                     queued.append(qjob)
                     save_queued(queued)
                     tag = " (deprioritized)" if deprioritized else ""
+                    if hold_until is not None and datetime.now() < hold_until:
+                        tag = (f" (deprioritized, held until "
+                               f"{hold_until.isoformat(timespec='minutes')})")
                     pin = (f" [devices {','.join(map(str, devices))}]"
                            if devices else "")
                     print(f"[gpuq] no slot; queued as job {qjob['id']}{tag}{pin}, "
@@ -1334,6 +1460,19 @@ def cmd_submit(args, config):
     if max_time_hours <= 0:
         die("-t/--time must be > 0 hours; there is no unlimited mode "
             "(ask the admin to raise max_job_time_hours if you need longer).")
+    # Hard wall-time ceiling. An explicit -t over the cap is rejected so the
+    # submitter knows; a config default that exceeds the cap is silently clamped
+    # (an admin misconfig must never break no-flag submits).
+    time_cap = config.get("max_job_time_hours_cap", DEFAULT_MAX_TIME_HOURS_CAP)
+    try:
+        time_cap = float(time_cap)
+    except (TypeError, ValueError):
+        time_cap = DEFAULT_MAX_TIME_HOURS_CAP
+    if time_cap > 0:
+        if args.time is not None and max_time_hours > time_cap:
+            die(f"-t/--time {max_time_hours:g}h exceeds the {time_cap:g}h "
+                f"({time_cap / 24:g}-day) wall-time cap on {HOST}.")
+        max_time_hours = min(max_time_hours, time_cap)
 
     # --devices: pin exact GPU(s). Each must be free or already owned by you.
     # Without --queue, reject immediately with a per-GPU reason; with --queue,
@@ -1368,6 +1507,15 @@ def cmd_submit(args, config):
                 die(f"no such GPU index(es) {bad} on {HOST} "
                     f"(valid: 0..{n_total - 1}).")
 
+    # Per-user concurrent-card hard cap: a single job asking for more cards
+    # than any user may ever hold can never run, --queue or not. Requests
+    # within the cap are enforced at claim time (pick_gpus), where jobs the
+    # user already holds count too and stacking onto owned cards stays free.
+    hard_cap = user_card_cap(config)
+    if hard_cap and args.gpus > hard_cap:
+        die(f"this host caps each user at {hard_cap} concurrent GPU(s) "
+            f"(per-user hard limit); you asked for {args.gpus} in one job.")
+
     # Quota: rolling 7-day GPU-hour budget, per user. Over-quota submitters are
     # deprioritized — forced into queue mode with a longer poll interval — and
     # emailed once. Applies to pinned (--devices) submits too: pinning chooses
@@ -1376,41 +1524,75 @@ def cmd_submit(args, config):
     requested_gpu_hours = args.gpus * max_time_hours
     over, used, budget = would_exceed_quota(USER, requested_gpu_hours, config)
     deprioritized = bool(over)
+    hold_until = None
     if over:
+        delay_h = quota_delay_hours(config)
+        if delay_h > 0:
+            hold_until = datetime.now() + timedelta(hours=delay_h)
         msg = (f"[gpuq] over quota: used {used:.1f} + requested {requested_gpu_hours:.1f} "
                f"GPU-hours > budget {budget:.1f} (rolling {QUOTA_WINDOW_HOURS}h). "
                "Job DEPRIORITIZED and queued; will only start once on-quota submitters "
-               "have a chance to grab slots.")
+               "have a chance to grab slots."
+               + (f" It is also held until "
+                  f"{hold_until.isoformat(timespec='minutes')} "
+                  f"({delay_h:g}h over-quota hold) before it may claim at all."
+                  if hold_until is not None else ""))
         print(msg, file=sys.stderr)
-        notify_quota_exceeded(USER, args.notify, used, requested_gpu_hours, budget, config)
+        notify_quota_exceeded(USER, args.notify, used, requested_gpu_hours,
+                              budget, config, hold_until=hold_until)
 
     # On-quota: try once, then reject (no --queue) or wait. Over-quota always
     # waits and yields to normal-priority submitters on its first poll.
     job = picked = None
     if not deprioritized:
         job, picked = _try_claim(cmd, args, memory_gb, max_time_hours,
-                                 devices=devices, submitted_at=submitted_at)
+                                 devices=devices, submitted_at=submitted_at,
+                                 hard_cap=hard_cap)
         if job is None and not args.queue:
+            with file_lock(LOCK_FILE):
+                running, _ = reap_running(load_running())
+                gpus = get_gpu_info()
+            # Was the per-user card cap the actual blocker? (The same request
+            # with the cap lifted would have been granted.) Label the message
+            # and the demand ledger accordingly, so a cap block is never
+            # misdiagnosed as a VRAM shortage or unavailable devices.
+            cap_blocked = (hard_cap > 0
+                           and pick_gpus(args.gpus, memory_gb, gpus, running,
+                                         USER, devices=devices,
+                                         hard_cap=0) is not None)
             if devices:
-                with file_lock(LOCK_FILE):
-                    running, _ = reap_running(load_running())
-                    gpus = get_gpu_info()
-                reasons = gpu_unavailability(devices, gpus, running, memory_gb, USER)
-                record_rejected_submit(args, memory_gb, max_time_hours,
-                                       "devices_unavailable", devices=devices)
+                reasons = gpu_unavailability(devices, gpus, running, memory_gb,
+                                             USER, hard_cap=hard_cap)
+                record_rejected_submit(
+                    args, memory_gb, max_time_hours,
+                    "user_card_cap" if cap_blocked else "devices_unavailable",
+                    devices=devices)
                 die("requested GPU(s) not available — not submitting:\n  "
                     + "\n  ".join(reasons) + "\nPass --queue to wait for them.")
             hint = ("" if args.memory is not None else
                     f"\n(The {memory_gb} GB free-VRAM filter is the default; "
                     "pass -m <smaller> if your job needs less.)")
-            record_rejected_submit(args, memory_gb, max_time_hours, "no_free_gpu")
+            cap_hint = ""
+            if cap_blocked:
+                held = sorted(_user_held_gpus(running, USER))
+                cap_hint = (f"\nPer-user card cap: you already hold GPU(s) "
+                            f"{held} of the {hard_cap}-card cap, so this "
+                            "submit may only stack onto those cards (needs "
+                            "enough free VRAM there) until one of your jobs "
+                            "ends.")
+            record_rejected_submit(
+                args, memory_gb, max_time_hours,
+                "user_card_cap" if cap_blocked else "no_free_gpu")
             die(f"no free GPU matches your request "
-                f"(need {args.gpus} GPU(s) with >= {memory_gb} GB free, util < "
-                f"{GPU_UTIL_AVAILABLE_THRESHOLD}%).{hint} Pass --queue to wait.")
+                f"(need {args.gpus} GPU(s) with >= {memory_gb} GB free; free cards "
+                f"also need util < {GPU_UTIL_AVAILABLE_THRESHOLD}%, a card you "
+                f"already run on does not but still needs that much free)."
+                f"{hint}{cap_hint} Pass --queue to wait.")
     if job is None:
         job, picked = _wait_for_slot(cmd, args, memory_gb, max_time_hours, config,
                                      devices=devices, deprioritized=deprioritized,
-                                     submitted_at=submitted_at)
+                                     submitted_at=submitted_at, hard_cap=hard_cap,
+                                     hold_until=hold_until)
 
     print(f"[gpuq] job {job['id']} starting on GPU(s) {','.join(map(str, picked))}",
           file=sys.stderr)
@@ -1634,6 +1816,9 @@ def cmd_status(args, config):
     for j in queued:
         prio = j.get("priority", "normal")
         tag = f" [{prio}]" if prio != "normal" else ""
+        hold = _parse_iso(j.get("hold_until") or "")
+        if hold and hold > datetime.now():
+            tag += f" (held until {hold.strftime('%m-%d %H:%M')})"
         want = f"{j.get('gpu_count', 1)} GPU(s)"
         if j.get("devices"):
             want = f"GPU {','.join(map(str, j['devices']))} (pinned)"
@@ -1875,8 +2060,10 @@ def cmd_quota(args, config):
         print(f"  budget:    {budget:.1f} GPU-hours per {QUOTA_WINDOW_HOURS // 24} "
               f"days ({pct:.0f}% used)")
         if used > budget:
-            print("  status:    OVER BUDGET — new submits are DEPRIORITIZED "
-                  "(queued behind on-quota users), never rejected")
+            delay_h = quota_delay_hours(config)
+            hold_txt = (f"held {delay_h:g}h, then " if delay_h > 0 else "")
+            print(f"  status:    OVER BUDGET — new submits are {hold_txt}"
+                  "DEPRIORITIZED (queued behind on-quota users), never rejected")
         else:
             print(f"  status:    OK — {budget - used:.1f} GPU-hours of headroom; "
                   "submits run at normal priority")
@@ -2164,12 +2351,18 @@ def cmd_kill(args, config):
 # Subcommand: config
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG_TEMPLATE = {
-    "max_job_time_hours": 24,
+    "max_job_time_hours": 24,         # default -t when the submitter passes none
+    "max_job_time_hours_cap": 48,     # hard wall-time ceiling = 2 days; -t may not exceed it
     "max_memory_per_gpu_gb": 70,
     # Default -m filter: min free VRAM (GB) a candidate GPU needs when the
     # submitter passes no -m. Distinct from max_memory_per_gpu_gb, which is a
     # legacy fallback for this default on configs that lack this key.
     "default_min_free_gb": 16,
+    # Hard cap on DISTINCT cards a user may hold at once (0 = off). Enforced at
+    # claim time: at the cap, new submits stack onto cards the user already
+    # owns instead of taking free ones. The audit max_gpus_per_user below is
+    # the softer warn-only threshold.
+    "max_gpus_per_user_hard": 3,
     "notification_email": {
         "enabled": False,
         "smtp_server": "smtp.gmail.com",
@@ -2181,6 +2374,7 @@ DEFAULT_CONFIG_TEMPLATE = {
     "slack": {"enabled": False, "webhook_url": "", "channel": "#gpu-alerts"},
     "quotas": {
         "default_gpu_hours_per_week": 0,  # 0 = unlimited
+        "delay_hours": 8,                  # over-quota submits are HELD this long before they may claim
         "users": {},                       # e.g. {"alice": 168}
     },
     "audit": {
@@ -2192,8 +2386,8 @@ DEFAULT_CONFIG_TEMPLATE = {
         "notify_untracked": False,
         "untracked_min_memory_mb": 512,   # ignore procs smaller than this
         "untracked_grace_seconds": 120,   # suppress flags right after a submit
-        "untracked_grace_hours": 24,      # offender's time to react before kill
-        "untracked_reminder_hours": 6,    # reminder cadence within the window
+        "untracked_grace_hours": 4,       # offender's time to react before kill
+        "untracked_reminder_hours": 2,    # reminder cadence within the window
         "untracked_allowlist": [],        # extra FULL login names never flagged
         # Rebind detector (off by default). When enabled, `gpuq audit` emails
         # users whose job runs on a GPU other than the one it was allocated, and
@@ -2201,8 +2395,8 @@ DEFAULT_CONFIG_TEMPLATE = {
         "notify_rebind": False,
         "rebind_min_memory_mb": 512,      # ignore procs smaller than this
         "rebind_grace_seconds": 120,      # suppress flags right after a submit
-        "rebind_grace_hours": 24,         # offender's time to react before kill
-        "rebind_reminder_hours": 6,       # reminder cadence within the window
+        "rebind_grace_hours": 4,          # offender's time to react before kill
+        "rebind_reminder_hours": 2,       # reminder cadence within the window
     },
 }
 
@@ -2849,11 +3043,16 @@ def main():
                                "Subject to the same quota gate as the picker.")
     p_submit.add_argument("-m", "--memory", type=int, default=None,
                           help="Only pick a GPU with at least this much free VRAM "
-                               "in GB (an admission filter, not a reservation; "
-                               "default: config default_min_free_gb).")
+                               "in GB (an admission filter on BOTH free GPUs and "
+                               "stacking onto cards you already own, not a "
+                               "reservation; default: config default_min_free_gb). "
+                               "Tip: pass a value your own busy card can't meet to "
+                               "make --queue wait for a genuinely free GPU instead "
+                               "of stacking.")
     p_submit.add_argument("-t", "--time", type=float, default=None,
-                          help="Max runtime in hours, > 0; the job is killed if it "
-                               "runs longer (default: config max_job_time_hours).")
+                          help="Max runtime in hours, > 0, capped at 48h (2 days); the "
+                               "job is killed if it runs longer "
+                               "(default: config max_job_time_hours).")
     p_submit.add_argument("--queue", action="store_true",
                           help="If no slot is free now, wait and poll instead of "
                                "exiting. Applies to both the default picker and "

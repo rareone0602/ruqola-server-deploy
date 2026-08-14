@@ -156,6 +156,63 @@ def test_default_pick_stacks_on_owned_when_no_free(gpuq_env, tmp_queue_dir,
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+def _own_busy_card(userspace_module):
+    """A running job I own, pinning GPU 0, with the card reported nearly full."""
+    return {"id": 42, "user": userspace_module.USER, "host": userspace_module.HOST,
+            "gpus": [0], "pid": 1, "started_at": "2020-01-01T00:00:00",
+            "command": "sleep 9999", "status": "running"}
+
+
+def test_owned_busy_card_rejects_unmet_memory(gpuq_env, tmp_queue_dir,
+                                              fake_gpus, userspace_module):
+    # Issue #1 (Bug 2): a card I OWN but that is nearly full must NOT be auto-stacked
+    # when -m asks for more free VRAM than it has. Pre-fix, -m was ignored on owned
+    # cards and the job stacked onto the busy card; now it is rejected with a reason.
+    _, write = fake_gpus
+    write({"gpus": [{"index": 0, "name": "X", "uuid": "GPU-x",
+                     "memory_used_mb": 75 * 1024, "memory_total_mb": 80 * 1024,
+                     "utilization": 100}], "compute_apps": []})   # ~5 GB free
+    (tmp_queue_dir / "running.json").write_text(
+        json.dumps([_own_busy_card(userspace_module)]))
+    r = run(["submit", "--devices", "0", "-m", "40", "-t", "1", "--", "/bin/true"],
+            gpuq_env)
+    assert r.returncode != 0
+    blob = r.stdout + r.stderr
+    assert "GPU 0" in blob and "40 GB" in blob          # honest per-card reason
+    # nothing was claimed/stacked: my original job is the only running entry
+    assert [j["id"] for j in
+            json.loads((tmp_queue_dir / "running.json").read_text())] == [42]
+
+
+def test_owned_busy_card_queue_waits_not_stacks(gpuq_env, tmp_queue_dir,
+                                                fake_gpus, userspace_module):
+    # Issue #1 (Bug 1): with --queue and an -m the owned busy card can't meet, gpuq
+    # must WAIT (register a queued entry) for the card to free, not instantly stack.
+    _, write = fake_gpus
+    write({"gpus": [{"index": 0, "name": "X", "uuid": "GPU-x",
+                     "memory_used_mb": 75 * 1024, "memory_total_mb": 80 * 1024,
+                     "utilization": 100}], "compute_apps": []})
+    (tmp_queue_dir / "running.json").write_text(
+        json.dumps([_own_busy_card(userspace_module)]))
+    proc = _spawn(["submit", "--devices", "0", "-m", "40", "--queue", "-t", "1",
+                   "--", "/bin/true"], gpuq_env)
+    try:
+        deadline = time.time() + 5
+        queued = []
+        while time.time() < deadline:
+            qf = tmp_queue_dir / "jobs.json"
+            if qf.exists():
+                queued = json.loads(qf.read_text())
+                if queued:
+                    break
+            time.sleep(0.1)
+        assert len(queued) == 1, queued          # waiting, not stacked
+        assert proc.poll() is None
+    finally:
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=5)
+
+
 def test_devices_queue_waits_for_other_user(gpuq_env, tmp_queue_dir, userspace_module):
     # GPU 0 is held by another user; --devices 0 --queue must WAIT (register a
     # queued entry) rather than reject.

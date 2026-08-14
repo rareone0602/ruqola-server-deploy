@@ -9,6 +9,38 @@ def _write_ledger(usage_file, entries):
             f.write(json.dumps(e) + "\n")
 
 
+def test_quota_delay_hours_parsing(userspace_module):
+    """quotas.delay_hours: hours an over-quota submit is held before it may
+    claim; absent/invalid/negative all mean no hold."""
+    f = userspace_module.quota_delay_hours
+    assert f({}) == 0.0
+    assert f({"quotas": {}}) == 0.0
+    assert f({"quotas": {"delay_hours": 8}}) == 8.0
+    assert f({"quotas": {"delay_hours": "6"}}) == 6.0
+    assert f({"quotas": {"delay_hours": -3}}) == 0.0
+    assert f({"quotas": {"delay_hours": "junk"}}) == 0.0
+    assert f({"quotas": {"delay_hours": None}}) == 0.0
+    assert f({"quotas": {"delay_hours": True}}) == 0.0  # bool is a misconfig
+
+
+def test_user_card_cap_parsing(userspace_module, capsys):
+    """max_gpus_per_user_hard faces the same hand-edited live config as
+    delay_hours; misconfigured values must fail OFF (0) and loudly, never
+    silently flip policy (JSON true would otherwise become a cap of 1)."""
+    f = userspace_module.user_card_cap
+    assert f({}) == 0
+    assert f({"max_gpus_per_user_hard": 3}) == 3
+    assert f({"max_gpus_per_user_hard": "3"}) == 3
+    assert f({"max_gpus_per_user_hard": 3.5}) == 3
+    assert f({"max_gpus_per_user_hard": 0}) == 0
+    assert f({"max_gpus_per_user_hard": -1}) == 0
+    assert f({"max_gpus_per_user_hard": None}) == 0
+    assert f({"max_gpus_per_user_hard": True}) == 0
+    assert f({"max_gpus_per_user_hard": "junk"}) == 0
+    err = capsys.readouterr().err
+    assert "max_gpus_per_user_hard" in err  # misconfigs warn on stderr
+
+
 def test_no_quota_means_unlimited(userspace_module):
     config = {}
     over, used, budget = userspace_module.would_exceed_quota("alice", 999, config)

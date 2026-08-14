@@ -1,8 +1,9 @@
 {
   "max_job_time_hours": 24,
-  "max_job_time_hours_cap": 96,
+  "max_job_time_hours_cap": 48,
   "max_memory_per_gpu_gb": 70,
   "default_min_free_gb": 16,
+  "max_gpus_per_user_hard": 3,
   "notification_email": {
     "enabled": false,
     "smtp_server": "smtp.gmail.com",
@@ -18,6 +19,7 @@
   },
   "quotas": {
     "default_gpu_hours_per_week": 0,
+    "delay_hours": 8,
     "users": {}
   },
   "audit": {
@@ -26,13 +28,13 @@
     "notify_untracked": false,
     "untracked_min_memory_mb": 512,
     "untracked_grace_seconds": 120,
-    "untracked_grace_hours": 8,
-    "untracked_reminder_hours": 4,
+    "untracked_grace_hours": 4,
+    "untracked_reminder_hours": 2,
     "untracked_allowlist": [],
     "notify_rebind": false,
     "rebind_min_memory_mb": 512,
     "rebind_grace_seconds": 120,
-    "rebind_grace_hours": 8,
-    "rebind_reminder_hours": 4
+    "rebind_grace_hours": 4,
+    "rebind_reminder_hours": 2
   }
 }

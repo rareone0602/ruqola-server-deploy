@@ -121,6 +121,27 @@ def test_quota_exceeded_email_uses_gecos(userspace_module, monkeypatch):
     assert "[gpuq] alice: GPU-hour quota exceeded" in raw
 
 
+def test_quota_exceeded_email_mentions_hold(userspace_module, monkeypatch):
+    """With a hold in force, the over-quota email tells the user when their job
+    becomes eligible."""
+    from datetime import datetime
+    config = {"notification_email": {
+        "enabled": True, "smtp_server": "smtp.example.com",
+        "smtp_port": 587, "username": "bot@lab.com", "password": "x",
+    }}
+    monkeypatch.setattr(userspace_module, "email_for_user",
+                        lambda u: "alice@lab.com")
+    with _patch_smtp(monkeypatch) as fake:
+        userspace_module.notify_quota_exceeded(
+            user="alice", notify_email=None,
+            used_hours=200.0, requested_hours=10.0, budget=100.0,
+            config=config, hold_until=datetime(2026, 1, 2, 12, 0, 0),
+        )
+    raw = fake.instances[0].sent[0]["msg"]
+    assert "held" in raw.lower()
+    assert "2026-01-02T12:00" in raw
+
+
 def test_quota_exceeded_no_email_when_no_gecos_email(userspace_module, monkeypatch):
     config = {"notification_email": {"enabled": True, "smtp_server": "x"}}
     monkeypatch.setattr(userspace_module, "email_for_user", lambda u: None)

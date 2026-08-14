@@ -222,8 +222,8 @@ echo $OLDPWD                    # previous directory
 
 # CUDA-related (for GPU computing)
 # This server has 4 H200 GPUs, indices 0,1,2,3.
-export CUDA_VISIBLE_DEVICES=0,1      # use GPUs 0 and 1
-export CUDA_VISIBLE_DEVICES=0,1,2,3  # use all four GPUs
+export CUDA_VISIBLE_DEVICES=0,1      # use GPUs 0 and 1 (outside gpuq only —
+                                     # `gpuq submit` sets this for you)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 ```
 
