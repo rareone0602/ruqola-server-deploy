@@ -108,7 +108,7 @@ and do **not** use the legacy `gpu_queue.py`.
      },
      "quotas": {
        "default_gpu_hours_per_week": 0,
-       "delay_hours": 8,
+       "delay_hours": 0.25,
        "users": {}
      },
      "audit": {
@@ -117,13 +117,13 @@ and do **not** use the legacy `gpu_queue.py`.
        "notify_untracked": false,
        "untracked_min_memory_mb": 512,
        "untracked_grace_seconds": 120,
-       "untracked_grace_hours": 4,
+       "untracked_grace_hours": 0.25,
        "untracked_reminder_hours": 2,
        "untracked_allowlist": [],
        "notify_rebind": false,
        "rebind_min_memory_mb": 512,
        "rebind_grace_seconds": 120,
-       "rebind_grace_hours": 4,
+       "rebind_grace_hours": 0.25,
        "rebind_reminder_hours": 2
      }
    }
@@ -416,7 +416,7 @@ in the config file:
 {
   "quotas": {
     "default_gpu_hours_per_week": 168,
-    "delay_hours": 8,
+    "delay_hours": 0.25,
     "users": { "alice": 250, "bob": 50 }
   }
 }
@@ -425,7 +425,8 @@ in the config file:
 A budget of `0` (or missing) means unlimited. `delay_hours` is the
 **over-quota hold**: how long an over-budget submit must wait after submission
 before it may claim any slot at all (0 or missing = no hold, deprioritization
-only).
+only). It is a float, so sub-hour holds are legal — the shipped `0.25` is
+**15 minutes**.
 
 Charging is by **actual runtime × GPUs held**, recorded in the ledger at job
 end. The rolling window is exact: a job straddling the 7-day cutoff is only
@@ -439,8 +440,8 @@ rejected** — instead it is:
 
 1. Marked `priority: low` and forced into the queue (warning printed), and —
    with `quotas.delay_hours` set — **held**: it may not claim a slot before
-   submit-time + that many hours. `gpuq status` shows the hold deadline on the
-   queued entry.
+   submit-time + that many hours (shipped default `0.25` = **15 minutes**).
+   `gpuq status` shows the hold deadline on the queued entry.
 2. Sent an email (if `notification_email` is enabled and the user has an email
    on their account, read from GECOS), including the hold deadline.
 3. Polled at a longer interval (default 120s, override with
@@ -521,7 +522,7 @@ tracking it). It is **off by default**; enable it in the `audit` block:
     "notify_untracked": true,
     "untracked_min_memory_mb": 512,
     "untracked_grace_seconds": 120,
-    "untracked_grace_hours": 4,
+    "untracked_grace_hours": 0.25,
     "untracked_reminder_hours": 2,
     "untracked_allowlist": ["serviceacct"]
   }
@@ -560,9 +561,13 @@ linger for your GPU users to get robust subprocess tracking fleet-wide.
 The lifecycle for each offending process group:
 
 1. **First seen** → email the offender (subject `[gpuq] <user>: untracked GPU
-   process on <host>`) stating a deadline `first_seen + untracked_grace_hours`.
+   process on <host>`) stating a deadline `first_seen + untracked_grace_hours`
+   (shipped default `0.25` = **15 minutes**).
 2. **During the window** → a reminder email at most every
-   `untracked_reminder_hours`.
+   `untracked_reminder_hours`. With the shipped 15-minute grace and 2h reminder
+   cadence no reminder can fit inside the window, so in practice the offender
+   gets the first-seen mail and then the kill mail; widen the grace if you want
+   reminders.
 3. **Past the deadline** → with `--enforce`, the process group is killed
    (`SIGTERM`, grace, `SIGKILL`) and the user is emailed that it was killed;
    without `--enforce`, it is escalated to the admin summary instead.
@@ -577,8 +582,17 @@ goes away.
 root, so run the killing form from **root's** crontab:
 
 ```
-0 * * * * /usr/local/bin/gpuq audit --enforce --quiet
+*/5 * * * * /usr/local/bin/gpuq audit --enforce --quiet
 ```
+
+**The grace window is only as tight as the cron.** Both `first_seen` and the
+kill happen *on an audit run*, never between them: an offender is first seen at
+the first run after it starts, and killed at the first run after
+`first_seen + <grace>_grace_hours`. So the shipped 15-minute grace only means
+15 minutes if the enforcing audit runs at least every ~5 minutes — on an hourly
+cron the same config kills after roughly two hours. Avoid setting the cron
+period equal to the grace (`*/15` with `0.25`): the deadline then lands within
+a second of a run, and whether it fires at 15 or 30 minutes is a coin flip.
 
 Run unprivileged, `--enforce` kills only your own processes and prints
 `cannot signal process group N (needs sudo/root)` for the rest — which is
@@ -607,7 +621,7 @@ like the untracked detector:
     "notify_rebind": true,
     "rebind_min_memory_mb": 512,
     "rebind_grace_seconds": 120,
-    "rebind_grace_hours": 4,
+    "rebind_grace_hours": 0.25,
     "rebind_reminder_hours": 2
   }
 }

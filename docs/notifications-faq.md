@@ -28,7 +28,7 @@ The system sends these kinds of notifications:
 
   Sent when you submit a job that would push you over your rolling 7-day GPU-hour
   quota (168 GPU-hours/week on this host). The job is still accepted, but it is
-  **held for 8 hours** from submission (the email states the exact deadline) and
+  **held for 15 minutes** from submission (the email states the exact deadline) and
   then queued at low priority, only starting once on-quota submitters have had a
   chance to grab the next free slot.
 
@@ -159,7 +159,8 @@ It contains settings for:
 - `slack`: `enabled`, `webhook_url`, and target `channel`.
 
 - `quotas`: `default_gpu_hours_per_week` (0 = unlimited; 168 on this host), the
-  over-quota hold `delay_hours` (8 here), and a per-user `users` map.
+  over-quota hold `delay_hours` (`0.25` here — **15 minutes**; it is a float,
+  so sub-hour holds are legal), and a per-user `users` map.
 
 - `max_gpus_per_user_hard`: the hard per-user concurrent-card cap enforced at
   submit/claim time (3 on this host; 0 = off).
@@ -202,7 +203,7 @@ GPU-hour budget (`quotas.default_gpu_hours_per_week`, or a per-user override in
 `quotas.users`), gpuq:
 
 - prints a notice in your terminal,
-- **holds the job for 8 hours** from submission (`quotas.delay_hours`) — it may
+- **holds the job for 15 minutes** from submission (`quotas.delay_hours`) — it may
   not start at all before then; the deadline is printed at submit and stated in
   the email,
 - queues the job at **low priority** (after the hold it still waits for on-quota
@@ -238,10 +239,12 @@ than `untracked_min_memory_mb`). For each offending process group it drives an e
 state machine:
 
 - **warn** — first detection; the user is told the process will be killed after its
-  grace deadline (`untracked_grace_hours`, **4h** from first detection on this host).
+  grace deadline (`untracked_grace_hours`, **15 min** from first detection on this host).
 
 - **remind** — sent at most every `untracked_reminder_hours` (**2h** here) while the
-  process is still untracked and before the deadline.
+  process is still untracked and before the deadline. With a 15-minute grace no
+  reminder fits inside the window, so in practice you get the warn mail and then
+  the kill mail.
 
 - **overdue** — sent once past the grace deadline (subject ends `PAST DEADLINE`).
 
@@ -261,9 +264,13 @@ allocated card is reserved but idle — typically because the job overrode the d
 e.g. set its own `--gpu N` or reset `CUDA_VISIBLE_DEVICES`).
 
 `gpuq audit` drives the same lifecycle as the untracked detector
-(warn → remind → overdue → killed), using `rebind_grace_hours` (**4h** here),
+(warn → remind → overdue → killed), using `rebind_grace_hours` (**15 min** here),
 `rebind_reminder_hours` (**2h** here), and `rebind_grace_seconds` (default 120s).
-Processes are killed only under `gpuq audit --enforce`.
+As with the untracked detector, a 2h reminder cadence cannot fire inside a
+15-minute window, so the sequence you actually see is warn → killed.
+Processes are killed only under `gpuq audit --enforce`. Both the first detection
+and the kill happen on a scheduled audit run, so the wall-clock time to a kill
+is the grace plus up to one audit period.
 
 ## ❓ When are disk quota notifications sent?
 

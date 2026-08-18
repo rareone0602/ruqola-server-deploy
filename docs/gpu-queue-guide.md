@@ -295,9 +295,9 @@ gpuq submit --devices 1,3 --queue -- python y.py # wait for exactly GPU 1 and 3
 > `CUDA_VISIBLE_DEVICES=0` in your command means **physical** GPU 0, not "my
 > first allocated GPU" — inside a gpuq job your allocated card is already
 > device 0. The `gpuq audit` **rebind detector** catches this: you get a
-> warning email at detection, reminders every **2 hours**, and the process is
-> **killed 4 hours** after first detection if not fixed. If you want a
-> specific card, pin it with `--devices`.
+> warning email at detection and the process is **killed 15 minutes** after
+> first detection if not fixed. If you want a specific card, pin it with
+> `--devices`.
 
 ## Monitoring and Management
 
@@ -428,7 +428,7 @@ The `gpuq status` footer also shows your 7-day total after every status check.
 When a `gpuq submit` would push you over budget, the job is **never
 rejected** — instead it is **held, then deprioritized**:
 
-1. **Held for 8 hours** from submission: it may not start at all before then.
+1. **Held for 15 minutes** from submission: it may not start at all before then.
    The hold deadline is printed at submit, emailed to you, and shown on the
    queued entry in `gpuq status`.
 2. Marked low-priority and forced into the queue; after the hold it only
@@ -709,8 +709,8 @@ gpuq status
 # 5. The per-user card cap: you already hold 3 cards (or the pin would give
 #    you a 4th). The message names the cap; new submits can still stack onto
 #    your own cards.
-# 6. You are over your GPU-hour quota — the job is held 8h and deprioritized,
-#    never rejected.
+# 6. You are over your GPU-hour quota — the job is held 15 min and
+#    deprioritized, never rejected.
 
 # Debugging smoke test
 gpuq submit -g 1 -t 1 -- echo "Test job"

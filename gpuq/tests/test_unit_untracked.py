@@ -327,3 +327,27 @@ def test_notify_untracked_emails_offender_and_skips_unknown(userspace_module, mo
     with _patch_smtp(monkeypatch) as fake2:
         assert us.notify_untracked("carol", sample, deadline, cfg, "warn") is False
     assert fake2.instances == []
+
+
+def test_builtin_grace_default_is_fifteen_minutes(userspace_module, monkeypatch):
+    """An audit block with no untracked_grace_hours must fall back to the
+    15-minute policy, not the old 24h one. Pinned from both sides so a stale
+    fallback in either direction fails loudly."""
+    us = userspace_module
+    proc = _proc()
+    t0 = datetime(2026, 6, 10, 12, 0, 0)
+    _run_check(us, [], [proc], monkeypatch, now=t0, audit_cfg={})   # warn
+
+    # +14m: still inside the window -> no kill.
+    _, _, k_early, _ = _run_check(us, [], [proc], monkeypatch,
+                                  now=t0 + timedelta(minutes=14),
+                                  enforce=True, audit_cfg={})
+    assert k_early == []
+
+    # +16m: past the deadline -> killed, and the user is told.
+    b, s, k, _ = _run_check(us, [], [proc], monkeypatch,
+                            now=t0 + timedelta(minutes=16),
+                            enforce=True, audit_cfg={})
+    assert any("PAST DEADLINE" in x for x in b)
+    assert k == [proc["pgid"]]
+    assert s and s[0]["kind"] == "killed"

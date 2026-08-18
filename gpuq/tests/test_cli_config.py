@@ -31,7 +31,12 @@ def test_config_init_writes_default_when_missing(gpuq_env, tmp_path):
 
 def test_config_init_template_carries_pressure_policy(gpuq_env, tmp_path):
     """The starter template ships the tightened limits: 48h wall cap, per-user
-    3-card hard cap, quota hold, and the 4h/2h audit grace/reminder cadence."""
+    3-card hard cap, a 15-minute over-quota hold, and a 15-minute audit grace.
+
+    The reminder cadence stays at 2h deliberately: it is shorter than no
+    throttle at all but longer than the grace window, so an offender gets one
+    warning at detection and one "killed" mail, with no reminder spam in
+    between (the kill path emails unconditionally, see check_untracked)."""
     cfg = tmp_path / "fresh_config.json"
     env = dict(gpuq_env)
     env["GPUQ_CONFIG_FILE"] = str(cfg)
@@ -40,11 +45,11 @@ def test_config_init_template_carries_pressure_policy(gpuq_env, tmp_path):
     data = json.loads(cfg.read_text())
     assert data["max_job_time_hours_cap"] == 48
     assert data["max_gpus_per_user_hard"] == 3
-    assert data["quotas"]["delay_hours"] == 8
+    assert data["quotas"]["delay_hours"] == 0.25   # 15 minutes
     audit = data["audit"]
-    assert audit["untracked_grace_hours"] == 4
+    assert audit["untracked_grace_hours"] == 0.25  # 15 minutes
     assert audit["untracked_reminder_hours"] == 2
-    assert audit["rebind_grace_hours"] == 4
+    assert audit["rebind_grace_hours"] == 0.25     # 15 minutes
     assert audit["rebind_reminder_hours"] == 2
 
 

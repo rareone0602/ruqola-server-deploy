@@ -2374,7 +2374,7 @@ DEFAULT_CONFIG_TEMPLATE = {
     "slack": {"enabled": False, "webhook_url": "", "channel": "#gpu-alerts"},
     "quotas": {
         "default_gpu_hours_per_week": 0,  # 0 = unlimited
-        "delay_hours": 8,                  # over-quota submits are HELD this long before they may claim
+        "delay_hours": 0.25,               # 15 min: over-quota submits are HELD this long before they may claim
         "users": {},                       # e.g. {"alice": 168}
     },
     "audit": {
@@ -2386,7 +2386,7 @@ DEFAULT_CONFIG_TEMPLATE = {
         "notify_untracked": False,
         "untracked_min_memory_mb": 512,   # ignore procs smaller than this
         "untracked_grace_seconds": 120,   # suppress flags right after a submit
-        "untracked_grace_hours": 4,       # offender's time to react before kill
+        "untracked_grace_hours": 0.25,    # 15 min: offender's time to react before kill
         "untracked_reminder_hours": 2,    # reminder cadence within the window
         "untracked_allowlist": [],        # extra FULL login names never flagged
         # Rebind detector (off by default). When enabled, `gpuq audit` emails
@@ -2395,7 +2395,7 @@ DEFAULT_CONFIG_TEMPLATE = {
         "notify_rebind": False,
         "rebind_min_memory_mb": 512,      # ignore procs smaller than this
         "rebind_grace_seconds": 120,      # suppress flags right after a submit
-        "rebind_grace_hours": 4,          # offender's time to react before kill
+        "rebind_grace_hours": 0.25,       # 15 min: offender's time to react before kill
         "rebind_reminder_hours": 2,       # reminder cadence within the window
     },
 }
@@ -2598,7 +2598,7 @@ def check_untracked(running, audit_cfg, args, config, now=None):
     now = now or datetime.now()
     min_mem = int(audit_cfg.get("untracked_min_memory_mb", 512))
     grace_sec = float(audit_cfg.get("untracked_grace_seconds", 120))
-    grace_h = float(audit_cfg.get("untracked_grace_hours", 24))
+    grace_h = float(audit_cfg.get("untracked_grace_hours", 0.25))
     reminder_h = float(audit_cfg.get("untracked_reminder_hours", 6))
     allowlist = SYSTEM_GPU_ACCOUNTS | set(audit_cfg.get("untracked_allowlist", []) or [])
     enforce = bool(getattr(args, "enforce", False))
@@ -2734,7 +2734,8 @@ def check_untracked(running, audit_cfg, args, config, now=None):
         # transient reason (VRAM dip below the threshold, the owner's fresh
         # submit opening the grace window) keeps its first_seen/deadline as
         # long as the process group itself is still alive — otherwise the
-        # 24h enforcement clock restarts on every such blip and never fires.
+        # 15-minute enforcement clock restarts on every such blip and never
+        # fires.
         state = {k: v for k, v in state.items()
                  if k in active or v.get("host") != HOST
                  or _state_group_alive(v)}
@@ -2775,7 +2776,7 @@ def check_rebind(running, audit_cfg, args, config, now=None):
     now = now or datetime.now()
     min_mem = int(audit_cfg.get("rebind_min_memory_mb", 512))
     grace_sec = float(audit_cfg.get("rebind_grace_seconds", 120))
-    grace_h = float(audit_cfg.get("rebind_grace_hours", 24))
+    grace_h = float(audit_cfg.get("rebind_grace_hours", 0.25))
     reminder_h = float(audit_cfg.get("rebind_reminder_hours", 6))
     enforce = bool(getattr(args, "enforce", False))
 

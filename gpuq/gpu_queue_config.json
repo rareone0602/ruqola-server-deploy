@@ -19,7 +19,7 @@
   },
   "quotas": {
     "default_gpu_hours_per_week": 0,
-    "delay_hours": 8,
+    "delay_hours": 0.25,
     "users": {}
   },
   "audit": {
@@ -28,13 +28,13 @@
     "notify_untracked": false,
     "untracked_min_memory_mb": 512,
     "untracked_grace_seconds": 120,
-    "untracked_grace_hours": 4,
+    "untracked_grace_hours": 0.25,
     "untracked_reminder_hours": 2,
     "untracked_allowlist": [],
     "notify_rebind": false,
     "rebind_min_memory_mb": 512,
     "rebind_grace_seconds": 120,
-    "rebind_grace_hours": 4,
+    "rebind_grace_hours": 0.25,
     "rebind_reminder_hours": 2
   }
 }

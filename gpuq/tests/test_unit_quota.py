@@ -17,6 +17,9 @@ def test_quota_delay_hours_parsing(userspace_module):
     assert f({"quotas": {}}) == 0.0
     assert f({"quotas": {"delay_hours": 8}}) == 8.0
     assert f({"quotas": {"delay_hours": "6"}}) == 6.0
+    # Sub-hour holds are legal and are the shipped policy: 0.25h == 15 minutes.
+    assert f({"quotas": {"delay_hours": 0.25}}) == 0.25
+    assert f({"quotas": {"delay_hours": "0.25"}}) == 0.25
     assert f({"quotas": {"delay_hours": -3}}) == 0.0
     assert f({"quotas": {"delay_hours": "junk"}}) == 0.0
     assert f({"quotas": {"delay_hours": None}}) == 0.0
