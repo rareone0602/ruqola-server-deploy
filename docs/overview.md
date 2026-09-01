@@ -31,9 +31,22 @@ Mjölnir is the NTU server most Ruqola members use day-to-day. Verified hardware
 
 GPU access on Mjölnir is coordinated **cooperatively** by `gpuq` (no hard
 reservation system): you submit jobs through `gpuq`, which assigns you free GPUs,
-and you may stack more of your own jobs on GPUs you already hold. Please always
-launch GPU work through `gpuq` — jobs started outside it are flagged by
-`gpuq audit`. See the [GPU Queue guide](gpu-queue-guide.md).
+and you may stack more of your own jobs on GPUs you already hold. **Always launch
+GPU work through `gpuq`** — a GPU process started outside it gets a warning email
+from `gpuq audit` and is **killed 15 minutes** after first detection. See the
+[GPU Queue guide](gpu-queue-guide.md).
+
+### Policy at a glance (current live settings)
+
+| Policy | Current setting |
+|---|---|
+| Wall time per job | **48-hour hard cap** — `-t/--time` may not exceed it; it is also the default, so pass a realistic smaller `-t` |
+| Cards per user | **3 GPUs hard cap**; holding 3 already triggers an admin warning, so treat **2** as the courtesy ceiling |
+| GPU-hour quota | **168 GPU-hours per rolling 7 days** (one H200 running 24/7). Going over never rejects a job — it is **held 15 minutes** at submit and deprioritized |
+| Jobs outside `gpuq` | Warning email at first detection, then **killed 15 minutes later** by the periodic `gpuq audit` sweep |
+
+Full details and the exact lifecycles: [GPU Queue guide](gpu-queue-guide.md) ·
+[Notifications FAQ](notifications-faq.md).
 
 ### Which Mjölnir doc do I need?
 
