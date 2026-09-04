@@ -1,0 +1,8 @@
+#!/bin/bash
+# Fake stat: for '-c %U' return the owner mapped in $FAKE_OWNER (path<TAB>user).
+# Everything else delegates to the real stat.
+if [[ "$1" == "-c" && "$2" == "%U" && -n "$FAKE_OWNER" ]]; then
+    owner=$(awk -F'\t' -v p="$3" '$1==p{print $2}' "$FAKE_OWNER" 2>/dev/null)
+    [[ -n "$owner" ]] && { printf '%s\n' "$owner"; exit 0; }
+fi
+exec /usr/bin/stat "$@"

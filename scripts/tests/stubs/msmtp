@@ -1,0 +1,7 @@
+#!/bin/bash
+# Fake msmtp: record one record per invocation into $MAIL_CAPTURE.
+{
+  printf '=== SEND recipient=[%s]\n' "$*"
+  cat
+  printf '\n=== END\n'
+} >> "$MAIL_CAPTURE"

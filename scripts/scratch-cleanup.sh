@@ -6,19 +6,30 @@
 # Usage: Run as root/administrator via cron
 
 # Configuration
-SCRATCH_DIRS=(
-    "/scratch/shared"
-    "/scratch/temp"
-    # "/scratch/datasets" # this we won't check so that files here don't get deleted
-    "/scratch/users"
-    # Add more directories as needed
-)
-DAYS_TO_KEEP=30
-DAYS_TO_NOTIFY=23
-LOG_DIR="/var/log"
-LOG_FILE="$LOG_DIR/scratch-cleanup.log"
+# All settings below may be overridden by SCRATCH_CLEANUP_* environment variables.
+# Production leaves them unset and gets the defaults; the test suite overrides them
+# so it never touches the real /scratch, /var/log or /run. Same pattern as gpuq's
+# GPUQ_QUEUE_DIR / GPUQ_CONFIG_FILE seams.
+if [[ -n "${SCRATCH_CLEANUP_DIRS:-}" ]]; then
+    IFS=':' read -r -a SCRATCH_DIRS <<< "$SCRATCH_CLEANUP_DIRS"
+else
+    SCRATCH_DIRS=(
+        "/scratch/shared"
+        "/scratch/temp"
+        # "/scratch/datasets" # this we won't check so that files here don't get deleted
+        "/scratch/users"
+        # Add more directories as needed
+    )
+fi
+DAYS_TO_KEEP="${SCRATCH_CLEANUP_DAYS_KEEP:-180}"
+DAYS_TO_NOTIFY="${SCRATCH_CLEANUP_DAYS_NOTIFY:-166}"
+LOG_FILE="${SCRATCH_CLEANUP_LOG:-/var/log/scratch-cleanup.log}"
+LOG_DIR="$(dirname "$LOG_FILE")"
 MAX_LOG_SIZE=$((10 * 1024 * 1024))  # 10MB in bytes
-LOCK_FILE="/var/run/scratch-cleanup.lock"
+LOCK_FILE="${SCRATCH_CLEANUP_LOCK:-/run/scratch-cleanup.lock}"
+MSMTP="${SCRATCH_CLEANUP_MSMTP:-/usr/bin/msmtp}"
+DRY_RUN="${SCRATCH_CLEANUP_DRYRUN:-}"
+ADMIN_EMAIL="${SCRATCH_CLEANUP_ADMIN_EMAIL:-mjolnirruqola@gmail.com}"
 
 # Colors for output (when run interactively)
 RED='\033[0;31m'
@@ -101,9 +112,7 @@ validate_directory() {
 # Function to check filesystem atime support
 check_atime_support() {
     local dir="$1"
-    # Use $$ (the PID) so concurrent runs get unique test files; a lone "$"
-    # is a literal dollar sign in a double-quoted string, not the PID.
-    local test_file="$dir/.atime_test_$$"
+    local test_file="$dir/.atime_test_$"
     
     # Create test file
     if ! touch "$test_file" 2>/dev/null; then
@@ -158,126 +167,140 @@ check_atime_support() {
 }
 
 # Function to clean directory
+
+# ---------------------------------------------------------------------------
+# Email helpers
+# ---------------------------------------------------------------------------
+
+# Notification address for an account, read from its GECOS field.
+# GECOS shapes on this host vary: some accounts are "Full Name,,,,addr@x" and
+# some are a bare "addr@x", so match an address ANYWHERE in the field instead of
+# assuming a fixed comma position. This is the same rule gpuq uses
+# (see email_for_user() in gpuq), so both tools agree on every account.
+email_for_user() {
+    getent passwd "$1" 2>/dev/null | awk -F: '{print $5}' \
+        | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | head -1
+}
+
+# Human name for an account, falling back to the username when GECOS holds only
+# an address (otherwise we would greet people by their own email address).
+full_name_for_user() {
+    local gecos name
+    gecos=$(getent passwd "$1" 2>/dev/null | awk -F: '{print $5}')
+    name="${gecos%%,*}"
+    if [[ -z "$name" || "$name" == *"@"* ]]; then printf '%s' "$1"; else printf '%s' "$name"; fi
+}
+
+# send_mail <recipient> <subject> <body>
+# Never invokes the mailer with an empty recipient.
+send_mail() {
+    local to="$1" subject="$2" body="$3"
+    if [[ -z "$to" ]]; then
+        return 1
+    fi
+    # A preview must not contact anyone. Under DRY_RUN, record the intent and stop.
+    if [[ -n "$DRY_RUN" ]]; then
+        log_message "INFO" "DRY RUN would email $to: $subject"
+        return 0
+    fi
+    printf 'To: %s\nFrom: %s\nSubject: %s\n\n%s\n' \
+        "$to" "$ADMIN_EMAIL" "$subject" "$body" | "$MSMTP" "$to"
+}
+
+# ---------------------------------------------------------------------------
+# Deletion
+# ---------------------------------------------------------------------------
 clean_directory() {
     local scratch_dir="$1"
-    local files_removed=0
-    local dirs_removed=0
-    local total_size=0
-    local errors=0
-    
-    log_message "INFO" "Starting cleanup of directory: $scratch_dir"
-    
-    # Validate directory
+    local files_removed=0 total_size=0 errors=0 dirs_removed=0
+    local -A user_list user_bytes user_count
+
     if ! validate_directory "$scratch_dir"; then
         return 1
     fi
-    
-    # Check atime support
-    if ! check_atime_support "$scratch_dir"; then
-        log_message "WARN" "Access time tracking may not be working properly in $scratch_dir (filesystem mounted with noatime/relatime?)"
-    fi
-    
-    # Find and process old files
-    log_message "INFO" "Searching for files not accessed in $DAYS_TO_KEEP days in $scratch_dir"
-    
-    # Use find with -atime for access time
+
+    log_message "INFO" "Cleaning directory: $scratch_dir (older than $DAYS_TO_KEEP days)"
+    [[ -n "$DRY_RUN" ]] && log_message "WARN" "DRY RUN active: nothing will be deleted"
+
     while IFS= read -r -d '' file; do
-        if [[ -f "$file" ]]; then
-            # Get file size before deletion
-            local file_size
-            if command -v stat >/dev/null 2>&1; then
-                file_size=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0)
-            else
-                file_size=0
-            fi
-            
-            # Get file access time for logging
-            local access_time
-            local username
-            if command -v stat >/dev/null 2>&1; then
-                access_time=$(stat -c %x "$file" 2>/dev/null || stat -f %Sa "$file" 2>/dev/null || echo "unknown")
-                # Leave the owner empty if it cannot be resolved; the
-                # notification below then falls back to the admin address
-                # instead of mis-attributing the file to a specific user.
-                username=$(stat -c %U "$file" 2>/dev/null || echo "")
-            else
-                access_time="unknown"
-            fi
+        [[ -f "$file" ]] || continue
 
-            # Attempt to remove file
-            if rm -f "$file"; then
-                log_message "INFO" "Removed: $file (size: ${file_size} bytes, last access: ${access_time})"
-                ((files_removed++))
-                ((total_size += file_size))
+        local file_size username
+        file_size=$(stat -c %s "$file" 2>/dev/null || echo 0)
+        username=$(stat -c %U "$file" 2>/dev/null || echo "")
 
-                # Form the user's email address
-                ADMIN_EMAIL=mjolnirruqola@gmail.com
-                USER_EMAIL=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $5}')
+        if [[ -n "$DRY_RUN" ]]; then
+            log_message "INFO" "DRY RUN would remove: $file (${file_size} bytes)"
+        elif rm -f "$file"; then
+            log_message "INFO" "Removed: $file (${file_size} bytes)"
+        else
+            log_message "ERROR" "Failed to remove: $file"
+            ((errors++))
+            continue
+        fi
 
-                USER_FULL_NAME=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $1}')
+        files_removed=$((files_removed + 1))
+        total_size=$((total_size + file_size))
+        if [[ -n "$username" ]]; then
+            user_list[$username]+="  ${file} (${file_size} bytes)"$'\n'
+            user_bytes[$username]=$(( ${user_bytes[$username]:-0} + file_size ))
+            user_count[$username]=$(( ${user_count[$username]:-0} + 1 ))
+        fi
+    done < <(find "$scratch_dir" -type f \( -atime +$DAYS_TO_KEEP -a -mtime +$DAYS_TO_KEEP \) -print0 2>/dev/null)
 
-                # Fall back to the admin if the owner / their email is unknown,
-                # so notifications about orphaned files are not misdirected.
-                if [[ -z "$USER_EMAIL" ]]; then
-                    USER_EMAIL="$ADMIN_EMAIL"
-                fi
-
-
-
-                DELETION_MAIL=$(cat <<EOF
-To: ${USER_EMAIL}
-From: ${ADMIN_EMAIL}
-Subject: Removed ${file}
-
-Hello ${USER_FULL_NAME},
+    # One digest per owner per run. Previously this sent one message per FILE,
+    # which on a large cohort would exhaust the shared Gmail quota and take the
+    # queue notifications down with it.
+    local u to name body subject
+    for u in "${!user_list[@]}"; do
+        to=$(email_for_user "$u")
+        name=$(full_name_for_user "$u")
+        subject="Scratch cleanup: ${user_count[$u]} file(s) removed"
+        body="Hello ${name},
 
 This is an automated notification from the server.
-The file ${file} has now been automatically deleted due to it not being accessed or modified in the last 30 days.
 
-If the file was not to be deleted: sincere apologies. Do make sure next time to use either the "/scratch/datasets" folder for permanent files or your own home directory for smaller permanent files.
-Any file in any other folder in the "/scratch/" directory will be deleted after 30 days of it being unaccessed or unmodified.
+The following ${user_count[$u]} file(s) under ${scratch_dir} were removed because
+they were neither modified nor accessed in the last ${DAYS_TO_KEEP} days
+(total $(format_bytes ${user_bytes[$u]})):
+
+${user_list[$u]}
+To keep files permanently, store them under /scratch/datasets/ or in your home
+directory.
 
 Thank you,
-System Administrator
-EOF
-)
-
-            # Send the email using msmtp
-            echo "$DELETION_MAIL" | /usr/bin/msmtp "$USER_EMAIL"
-            echo "Sent deletion email to $USER_EMAIL"
-
-            else
-                log_message "ERROR" "Failed to remove: $file"
-                ((errors++))
-            fi
+System Administrator"
+        if send_mail "$to" "$subject" "$body"; then
+            log_message "INFO" "Deletion digest sent to $u <$to> (${user_count[$u]} file(s))"
+        else
+            log_message "WARN" "No email address on account '$u'; ${user_count[$u]} deletion(s) unreported"
         fi
-    # /scratch is mounted `noatime`, so atime is frozen at creation and never
-    # updates on read. The old `-atime +N -o -mtime +N` (OR) therefore deleted
-    # any file *created* over N days ago even if it was modified today. Key the
-    # cleanup off modification time only — the sole reliable staleness signal here.
-    done < <(find "$scratch_dir" -type f -mtime +$DAYS_TO_KEEP -print0 2>/dev/null)
-    
-    # Clean up empty directories (but preserve important structure)
-    log_message "INFO" "Removing empty directories in $scratch_dir (preserving structure)"
-    
+    done
+
+    # Clean up empty directories (but preserve important structure).
+    # The age gate matters: without -mtime this removed ANY empty directory,
+    # including one created seconds earlier, so a job that pre-created its
+    # output tree and was still running at 02:30 lost it. Directories now age
+    # out on the same DAYS_TO_KEEP clock as files.
+    log_message "INFO" "Removing empty directories in $scratch_dir older than $DAYS_TO_KEEP days"
+
     # Define directories to preserve (never delete these even if empty)
     local preserve_dirs=(
         "/scratch/shared"
-        "/scratch/temp" 
+        "/scratch/temp"
         "/scratch/datasets"
         "/scratch/users"
     )
-    
+
     # Add all user directories to preserve list
     if [[ -d "/scratch/users" ]]; then
         while IFS= read -r -d '' user_dir; do
             preserve_dirs+=("$user_dir")
         done < <(find "/scratch/users" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
     fi
-    
+
     while IFS= read -r -d '' dir; do
         if [[ -d "$dir" ]] && [[ "$dir" != "$scratch_dir" ]]; then
-            # Check if this directory should be preserved
             local preserve=false
             for preserve_dir in "${preserve_dirs[@]}"; do
                 if [[ "$dir" == "$preserve_dir" ]]; then
@@ -286,10 +309,11 @@ EOF
                     break
                 fi
             done
-            
-            # Only remove if not in preserve list
+
             if [[ "$preserve" == false ]]; then
-                if rmdir "$dir" 2>/dev/null; then
+                if [[ -n "$DRY_RUN" ]]; then
+                    log_message "INFO" "DRY RUN would remove empty directory: $dir"
+                elif rmdir "$dir" 2>/dev/null; then
                     log_message "INFO" "Removed empty directory: $dir"
                     ((dirs_removed++))
                 else
@@ -297,91 +321,83 @@ EOF
                 fi
             fi
         fi
-    done < <(find "$scratch_dir" -mindepth 1 -type d -empty -print0 2>/dev/null)
-    
-    # Summary for this directory
-    log_message "INFO" "Cleanup summary for $scratch_dir: $files_removed files removed ($(numfmt --to=iec $total_size 2>/dev/null || echo "${total_size} bytes")), $dirs_removed directories removed, $errors errors"
-    
+    done < <(find "$scratch_dir" -mindepth 1 -type d -empty -mtime +$DAYS_TO_KEEP -print0 2>/dev/null)
+
+    log_message "INFO" "Cleanup summary for $scratch_dir: $files_removed file(s) removed ($(numfmt --to=iec $total_size 2>/dev/null || echo "${total_size} bytes")), $dirs_removed directory(ies) removed, $errors error(s)"
+
     return $errors
 }
 
+# ---------------------------------------------------------------------------
+# Advance warning
+# ---------------------------------------------------------------------------
 notify_imminent_deletion(){
     local scratch_dir="$1"
+    local -A warn_list warn_count warn_min
 
-    # Use find with -atime for access time
+    if ! validate_directory "$scratch_dir"; then
+        return 1
+    fi
+
+    local now
+    now=$(date +%s)
+
+    # Warn only about files INSIDE the window: past the notification age but not
+    # yet past the deletion age. The old query selected a superset that included
+    # everything about to be deleted in this same run, so users received a "you
+    # have time to save this" mail seconds before the "this was deleted" mail.
     while IFS= read -r -d '' file; do
-        if [[ -f "$file" ]]; then
-            
-            # Get file access time for logging
-            local access_time
-            local username
-            if command -v stat >/dev/null 2>&1; then
-                access_time=$(stat -c %x "$file" 2>/dev/null || stat -f %Sa "$file" 2>/dev/null || echo "unknown")
-                # Leave the owner empty if it cannot be resolved; the
-                # notification below then falls back to the admin address
-                # instead of mis-attributing the file to a specific user.
-                username=$(stat -c %U "$file" 2>/dev/null || echo "")
-                # Last *modification* time in seconds since the epoch. (atime is
-                # unreliable here: /scratch is mounted noatime, so %X never moves.)
-                last_modify_seconds=$(stat -c %Y "$file")
+        [[ -f "$file" ]] || continue
 
-                # Get the current time in seconds
-                current_seconds=$(date +%s)
+        local username atime_s mtime_s newest elapsed_days days_remaining
+        username=$(stat -c %U "$file" 2>/dev/null || echo "")
+        [[ -n "$username" ]] || continue
+        atime_s=$(stat -c %X "$file" 2>/dev/null || echo 0)
+        mtime_s=$(stat -c %Y "$file" 2>/dev/null || echo 0)
 
-                # Calculate the elapsed time in seconds
-                elapsed_seconds=$((current_seconds - last_modify_seconds))
+        # Deletion needs BOTH timestamps past the limit, so the countdown is
+        # governed by the NEWER of the two, not by atime alone.
+        if (( atime_s > mtime_s )); then newest=$atime_s; else newest=$mtime_s; fi
+        elapsed_days=$(( (now - newest) / 86400 ))
+        days_remaining=$(( DAYS_TO_KEEP - elapsed_days ))
+        (( days_remaining < 0 )) && days_remaining=0
 
-                # Calculate the elapsed time in days
-                elapsed_days=$((elapsed_seconds / 86400))
+        warn_list[$username]+="  ${file} (${days_remaining} day(s) remaining)"$'\n'
+        warn_count[$username]=$(( ${warn_count[$username]:-0} + 1 ))
+        if [[ -z "${warn_min[$username]:-}" ]] || (( days_remaining < warn_min[$username] )); then
+            warn_min[$username]=$days_remaining
+        fi
+    done < <(find "$scratch_dir" -type f \
+                   \( -atime +$DAYS_TO_NOTIFY -a -mtime +$DAYS_TO_NOTIFY \) \
+                 ! \( -atime +$DAYS_TO_KEEP   -a -mtime +$DAYS_TO_KEEP   \) -print0 2>/dev/null)
 
-                # Calculate the days remaining until 30 days
-                days_remaining=$((30 - elapsed_days))
-
-            else
-                access_time="unknown"
-            fi
-
-            log_message "INFO" "Notification sent for imminent deletion: $file (last access: ${access_time})"
-
-            # Form the user's email address
-            ADMIN_EMAIL=mjolnirruqola@gmail.com
-            USER_EMAIL=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $5}')
-
-            USER_FULL_NAME=$(getent passwd ${username} | awk -F ':' '{print $5}' | awk -F ',' '{print $1}')
-
-            # Fall back to the admin if the owner / their email is unknown,
-            # so notifications about orphaned files are not misdirected.
-            if [[ -z "$USER_EMAIL" ]]; then
-                USER_EMAIL="$ADMIN_EMAIL"
-            fi
-
-            NOTIFICATION_MAIL=$(cat <<EOF
-To: ${USER_EMAIL}
-From: ${ADMIN_EMAIL}
-Subject: Imminent Removal ${file}
-
-Hello ${USER_FULL_NAME},
+    local u to name body subject
+    for u in "${!warn_list[@]}"; do
+        to=$(email_for_user "$u")
+        name=$(full_name_for_user "$u")
+        subject="Imminent removal: ${warn_count[$u]} file(s) under ${scratch_dir}"
+        body="Hello ${name},
 
 This is an automated notification from the server.
-The file ${file} has passed the notification period of 23 days without being accessed or modified.
-After 30 days without being accessed or modified files in "/scratch/" sub-directories except the ones in "/scratch/datasets" will be automatically deleted.
 
-If the file is not to be deleted, please modify it (re-save it, or run `touch` on it) or copy it to a permanent directory within ${days_remaining} days. Note: simply opening or reading the file does NOT reset the timer.
+The following ${warn_count[$u]} file(s) have gone more than ${DAYS_TO_NOTIFY} days
+without being modified or accessed. Files under /scratch/ (except
+/scratch/datasets/) are removed after ${DAYS_TO_KEEP} days.
+
+${warn_list[$u]}
+To keep them, modify them or copy them somewhere permanent within
+${warn_min[$u]} day(s).
 
 Thank you,
-System Administrator
-EOF
-)
-
-            # Send the email using msmtp
-            echo "$NOTIFICATION_MAIL" | /usr/bin/msmtp "$USER_EMAIL"
-            echo "Sent notification email to $USER_EMAIL"
+System Administrator"
+        if send_mail "$to" "$subject" "$body"; then
+            log_message "INFO" "Warning digest sent to $u <$to> (${warn_count[$u]} file(s))"
+        else
+            log_message "WARN" "No email address on account '$u'; ${warn_count[$u]} warning(s) undelivered"
         fi
-    # Only notify for files in the warning window (>= DAYS_TO_NOTIFY but not yet
-    # eligible for deletion). Excluding files already past DAYS_TO_KEEP stops
-    # users getting a contradictory "imminent removal" email in the same run
-    # that also deletes the file.
-    done < <(find "$scratch_dir" -type f -mtime +$DAYS_TO_NOTIFY ! -mtime +$DAYS_TO_KEEP -print0 2>/dev/null)
+    done
+
+    return 0
 }
 
 # Function to format bytes
@@ -448,5 +464,48 @@ main() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+Usage: scratch-cleanup.sh [OPTION]
+
+Removes files under the scratch directories that have been neither read nor
+modified for DAYS_TO_KEEP days, warning their owners DAYS_TO_NOTIFY days first.
+
+  --dry-run       report what would be removed and emailed; change nothing,
+                  contact nobody
+  --show-config   print the retention policy and exit
+
+  -h, --help      this text
+
+THIS FILE IS THE SINGLE SOURCE OF TRUTH for the retention numbers. Anything
+else that quotes them (scratch-usage.sh, /scratch/README.txt, the docs) must
+read them from '--show-config' rather than restating them, or they drift.
+
+Every setting can be overridden with a SCRATCH_CLEANUP_* environment variable;
+see the configuration block at the top of this file.
+EOF
+}
+
+show_config() {
+    cat <<EOF
+DAYS_TO_KEEP=$DAYS_TO_KEEP
+DAYS_TO_NOTIFY=$DAYS_TO_NOTIFY
+SCRATCH_DIRS=${SCRATCH_DIRS[*]}
+LOG_FILE=$LOG_FILE
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)     DRY_RUN=1; shift ;;
+        --show-config) show_config; exit 0 ;;
+        -h|--help)     usage; exit 0 ;;
+        *)             printf 'unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
 # Run main function
-main "$@"
+main
