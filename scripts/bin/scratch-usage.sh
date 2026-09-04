@@ -6,8 +6,10 @@
 # Restating them is what produced three different published numbers
 # (25 here, 30 in README.txt, 180 in the actual cleaner).
 
-SCRATCH_BASE="/scratch"
-CLEANUP="${SCRATCH_CLEANUP_BIN:-/usr/local/bin/scratch-cleanup.sh}"
+SCRATCH_BASE="${SCRATCH_USAGE_BASE:-/scratch}"
+# The cleaner that sits next to this script: /usr/local/bin when installed,
+# bin/ when run from the repo.
+CLEANUP="${SCRATCH_CLEANUP_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scratch-cleanup.sh}"
 
 # --- read the policy from the SSOT ----------------------------------------
 DAYS_TO_KEEP=""; DAYS_TO_NOTIFY=""; SCRATCH_DIRS=""

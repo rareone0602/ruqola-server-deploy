@@ -1,0 +1,48 @@
+# ruqola-admin install manifest: every path this project manages on the host.
+# install.sh reads this file; nothing else decides what goes where.
+#
+# Columns (whitespace separated):   kind  source  destination  mode  owner
+#
+#   file    copy source to destination with that mode and owner
+#   unit    like file; `systemctl daemon-reload` runs afterwards if it changed
+#   link    destination becomes a symlink named source (a sibling in the same dir)
+#   render  run source (a generator) and install its stdout at destination
+#   retire  destination (a path or glob) must NOT exist; anything there is moved
+#           to the backup folder
+#
+# Order matters: entries are applied top to bottom, so the shared library comes
+# before the scripts that source it.
+#
+# Adding a script: put it in bin/, add one `file` line here, add tests/test_<name>.sh.
+
+# --- shared library ---------------------------------------------------------
+file    lib/init.sh                      /usr/local/lib/ruqola-admin/init.sh           0644  root:root
+file    lib/log.sh                       /usr/local/lib/ruqola-admin/log.sh            0644  root:root
+file    lib/mail.sh                      /usr/local/lib/ruqola-admin/mail.sh           0644  root:root
+file    lib/fs.sh                        /usr/local/lib/ruqola-admin/fs.sh             0644  root:root
+
+# --- scheduled: root, nightly ----------------------------------------------
+file    bin/scratch-cleanup.sh           /usr/local/bin/scratch-cleanup.sh             0755  root:root
+unit    systemd/scratch-cleanup.service  /etc/systemd/system/scratch-cleanup.service   0644  root:root
+unit    systemd/scratch-cleanup.timer    /etc/systemd/system/scratch-cleanup.timer     0644  root:root
+file    logrotate.d/scratch-cleanup      /etc/logrotate.d/scratch-cleanup              0644  root:root
+
+# --- administrator tools: a sudoer runs these by hand ----------------------
+file    bin/check_quotas.sh              /usr/local/bin/check_quotas.sh                0755  root:root
+file    bin/add_users.sh                 /usr/local/bin/add_users.sh                   0755  root:root
+file    bin/delete_users.sh              /usr/local/bin/delete_users.sh                0755  root:root
+link    add_users.sh                     /usr/local/bin/create_users                   -     -
+link    delete_users.sh                  /usr/local/bin/delete_users                   -     -
+
+# --- everyone ---------------------------------------------------------------
+file    bin/scratch-usage.sh             /usr/local/bin/scratch-usage.sh               0755  root:root
+file    bin/scratch-status               /usr/local/bin/scratch-status                 0755  root:root
+render  tools/render-readme.sh           /scratch/README.txt                           0644  root:root
+
+# --- must not exist ---------------------------------------------------------
+# scratch-backup.sh was never a backup: a stale copy of the 30-day cleaner whose
+# directory list INCLUDED /scratch/datasets. Run as root it would empty /scratch.
+retire  -                                /usr/local/bin/scratch-backup.sh              -     -
+# Backups belong in /var/backups/ruqola-admin, not on PATH.
+retire  -                                /usr/local/bin/*.bak-*                        -     -
+retire  -                                /scratch/README.txt.bak-*                     -     -

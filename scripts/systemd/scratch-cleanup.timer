@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Scratch Folder Cleanup
+Requires=scratch-cleanup.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+OnBootSec=15min
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

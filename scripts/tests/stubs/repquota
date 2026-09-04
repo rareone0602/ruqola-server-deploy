@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake repquota: print $FAKE_REPQUOTA; fail like the real one would without root.
+[[ -n "${FAKE_REPQUOTA:-}" && -f "$FAKE_REPQUOTA" ]] || { echo "repquota: cannot open quota file" >&2; exit 1; }
+cat "$FAKE_REPQUOTA"

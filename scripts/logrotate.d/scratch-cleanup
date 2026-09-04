@@ -1,0 +1,16 @@
+# Rotation for the scratch reaper's chatty per-file log.
+#
+# The deletion manifest under /var/log/scratch-cleanup/ is deliberately NOT
+# listed here: it is the durable record of what was deleted and is never
+# rotated by automation. The script used to rotate this log itself, at 10 MB
+# with one generation, which kept about four nights of history.
+/var/log/scratch-cleanup.log {
+    weekly
+    maxsize 50M
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}

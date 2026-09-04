@@ -357,5 +357,5 @@ main() {
     esac
 }
 
-# Run main function with all arguments
-main "$@"
+# Run main only when executed, so tests can source the functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

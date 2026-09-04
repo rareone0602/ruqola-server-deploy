@@ -6,7 +6,9 @@
 #   sudo ./render-readme.sh --write   # install to /scratch/README.txt
 set -euo pipefail
 
-CLEANUP="${SCRATCH_CLEANUP_BIN:-/usr/local/bin/scratch-cleanup.sh}"
+# Default: the repo's own cleaner (tools/ sits beside bin/). The installer passes
+# SCRATCH_CLEANUP_BIN=/usr/local/bin/scratch-cleanup.sh to render from the live one.
+CLEANUP="${SCRATCH_CLEANUP_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/scratch-cleanup.sh}"
 TARGET="${SCRATCH_README:-/scratch/README.txt}"
 WRITE=0; [[ "${1:-}" == "--write" ]] && WRITE=1
 

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake systemctl: record the call, succeed.
+printf 'systemctl %s\n' "$*" >> "${STUB_CALLS:-/dev/null}"
+exit 0

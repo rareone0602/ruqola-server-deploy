@@ -8,11 +8,23 @@ QUOTA_HARD="100G"     # Hard limit (enforced)
 DEFAULT_SHELL="/bin/bash"
 USER_GROUPS="users,scratch-users,gpuqueue"  # Standard research user groups
 LOG_FILE="/var/log/user_creation.log"
+ADMIN_EMAIL="mjolnirruqola@gmail.com"
+DOCS_URL="https://ighina.github.io/ruqola-server-deploy/"
 
-# Function to log messages
+# --- shared library: lib/log.sh lib/mail.sh lib/fs.sh -----------------------
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${RUQOLA_ADMIN_LIB:-}" ]]; then
+    if [[ -f "$_here/../lib/init.sh" ]]; then RUQOLA_ADMIN_LIB="$_here/../lib"   # running from the repo
+    else RUQOLA_ADMIN_LIB=/usr/local/lib/ruqola-admin; fi                        # installed
+fi
+source "$RUQOLA_ADMIN_LIB/init.sh" || { echo "add_users.sh: cannot load shared library from $RUQOLA_ADMIN_LIB" >&2; exit 1; }
+
+# This script's own one-argument logger (defined AFTER the library so it wins).
+# The library's send_mail logs through _mail_log, which tolerates this form.
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S'): $1" | tee -a "$LOG_FILE"
 }
+
 
 # Function to check if quota is enabled
 check_quota_support() {
@@ -98,24 +110,11 @@ create_user() {
 
     sudo chfn -o "$email" "$username";
     
-    # Form the user's email address
-    # Email address for the system administrator
-    ADMIN_EMAIL="mjolnirruqola@gmail.com"
-
-    # Subject line for the notification email
-    SUBJECT="User Account Created on Mjolnir"
-
-    # Create the email message body
-    MAIL=$(cat <<EOF
-To: ${email}
-From: ${ADMIN_EMAIL}
-Subject: ${SUBJECT}
-Content-Type: text/html; charset="UTF-8"
-
-Hello ${fullname},
+    # Welcome mail (HTML). send_mail runs msmtp under sudo when we are not root.
+    if send_mail "$email" "User Account Created on Mjolnir" "Hello ${fullname},
 <br>
 This is an automated notification from the server.<br>
-A user account has been created for you with the username: 
+A user account has been created for you with the username:
 <br><b>${username}</b>
 <br><br>
 Please log in with the following password:<br>
@@ -123,16 +122,15 @@ Please log in with the following password:<br>
 <br>
 and change it immediately when prompted.<br><br>
 Once done it you can start using the server following the documentation at:<br>
-<a href="https://ighina.github.io/ruqola-server-deploy/">Mjolnir Documentation</a>
+<a href=\"${DOCS_URL}\">Mjolnir Documentation</a>
 <br><br>
 Thank you,<br>
-System Administrator
-EOF
-)
-
-    # Send the email using msmtp
-    echo "$MAIL" | sudo /usr/bin/msmtp "$email"
-    echo "Sent account creation notification to $email"
+System Administrator" 'text/html; charset="UTF-8"'
+    then
+        echo "Sent account creation notification to $email"
+    else
+        log_message "WARNING: could not send the welcome email to '$email' for $username"
+    fi
 
     log_message "COMPLETED: User $username setup finished"
     return 0
@@ -261,5 +259,5 @@ TO ENABLE DISK QUOTAS:
    sudo repquota -a
 '
 
-# Run main function with all arguments
-main "$@"
+# Run main only when executed, so tests can source the functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

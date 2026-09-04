@@ -87,21 +87,31 @@ System Administrator
 
 - **Scratch Files expiration warning / deletion notification (`scratch-cleanup.sh`, email)**
 
-  Triggered when a file under a scratch folder (except `/scratch/datasets`) has not
-  been accessed or modified for at least 23 days (warning period). After 30 days the
-  file is deleted and a deletion notification is sent as well. The folders checked
-  are `/scratch/shared`, `/scratch/temp`, and `/scratch/users`.
+  Triggered when a file under a scratch folder (except `/scratch/datasets`) has had
+  no read and no write for 166 days (warning period). After 180 days with no read
+  and no write the file is deleted and a deletion digest is sent: one message per
+  user per run listing every file, not one message per file. The folders checked
+  are `/scratch/shared`, `/scratch/temp`, and `/scratch/users`. Every deletion is
+  also recorded in `/var/log/scratch-cleanup/deleted-YYYY-MM.tsv` (root-readable),
+  so an administrator can answer "what was deleted from my directory on that date"
+  long after the chatty log has rotated.
 
   Example:
 
 ~~~
-Hello user,
+Hello Alice Smith,
 
 This is an automated notification from the server.
-The file /scratch/users/user/test_file.txt has now been automatically deleted due to it not being accessed or modified in the last 30 days.
 
-If the file was not to be deleted: sincere apologies. Do make sure next time to use either the /scratch/datasets folder for permanent files or your own home directory for smaller permanent files.
-Any file in any other folder in the /scratch/ directory will be deleted after 30 days of it being unaccessed or unmodified.
+The following 2 file(s) under /scratch/users were removed because
+they were neither modified nor accessed in the last 180 days
+(total 1.3G):
+
+  /scratch/users/alice/run3/checkpoint.pt (1300000000 bytes)
+  /scratch/users/alice/run3/log.txt (2048 bytes)
+
+To keep files permanently, store them under /scratch/datasets/ or in your home
+directory.
 
 Thank you,
 System Administrator
@@ -174,8 +184,10 @@ GECOS field (`getent passwd <user>`); accounts are provisioned with the email th
 so the account is the single source of truth.
 
 > The disk-quota (`check_quotas.sh`) and scratch-cleanup (`scratch-cleanup.sh`)
-> scripts are separate shell scripts run from cron. They send mail via `msmtp` and
-> read the recipient address from the GECOS field, not from the gpuq config file.
+> scripts are separate shell scripts (the cleanup runs nightly from a systemd
+> timer; the quota check is run by hand). They send mail via `msmtp` and read the
+> recipient address from the GECOS field with the same rule gpuq uses, so all
+> three tools agree on every account.
 
 ## ❓ When are job completion notifications sent?
 
@@ -285,11 +297,15 @@ configured with.
 For any file under a checked scratch directory (`/scratch/shared`, `/scratch/temp`,
 `/scratch/users`) — but **not** `/scratch/datasets`:
 
-- **Deletion warning**: when the file has not been accessed or modified in the last
-  23 days (`DAYS_TO_NOTIFY=23`).
+- **Deletion warning**: when the file has had no read and no write for 166 days
+  (`DAYS_TO_NOTIFY=166`). Files already past the deletion age are not warned about;
+  they are deleted in the same run and reported in the deletion digest instead.
 
-- **Deletion notification**: when the file has not been accessed or modified in the
-  last 30 days (`DAYS_TO_KEEP=30`); the file is deleted and the user is emailed.
+- **Deletion notification**: when the file has had no read and no write for 180 days
+  (`DAYS_TO_KEEP=180`); the file is deleted and the user is emailed one digest per run.
+
+The authoritative values are printed by `scratch-cleanup.sh --show-config`; this
+page is tested against them.
 
 ## ❓ Where can I find logs of my jobs?
 

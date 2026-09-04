@@ -1,6 +1,8 @@
 # SCRATCH FOLDER USAGE GUIDELINES
 
-The scratch space is designed for temporary storage of datasets and computational work. Files are automatically cleaned up **30 days after they were last modified**. The `/scratch` filesystem is mounted `noatime`, so simply *reading/opening* a file is **not** tracked and does **not** keep it alive — only the modification time (mtime) counts. To preserve a file, modify it (or run `touch` on it) within the window, or move it to a permanent location (`/scratch/datasets/` for large shared data, or your home directory for small files).
+The scratch space is designed for temporary storage of datasets and computational work. A file is automatically deleted once it has gone **180 days with no read and no write**. Both count: opening a file resets its clock (the filesystem is mounted `relatime`, so reads are tracked), and so does modifying it. You are emailed a warning after 166 days, about 14 days before removal. To preserve a file, read or modify it within the window, or move it to a permanent location (`/scratch/datasets/` for large shared data, or your home directory for small files).
+
+The exact numbers are read from the cleanup script itself (`scratch-cleanup.sh --show-config`); this page is checked against it by the test suite.
 
 ## DIRECTORY STRUCTURE:
 The main directory can be found at /scratch/, with all the subfolders described as follow:
@@ -8,7 +10,7 @@ The main directory can be found at /scratch/, with all the subfolders described 
 ```
 /scratch/
 ├── shared/     - Shared space for all users (group writable)
-├── temp/       - Temporary files (world-writable with sticky bit, like /tmp); subject to the same 30-day cleanup as other scratch areas
+├── temp/       - Temporary files (world-writable with sticky bit, like /tmp); subject to the same 180-day cleanup as other scratch areas
 ├── datasets/   - Shared datasets (group readable/writable, no expiration)
 └── users/      - Individual user directories
     ├── user1/  - Personal scratch space for user1
@@ -58,46 +60,44 @@ mkdir -p $TMPDIR
 sort large_file.txt > $TMPDIR/sorted_output.txt
 ```
 
-## CHECKING MODIFICATION TIMES AND CLEANUP STATUS
+## CHECKING TIMESTAMPS AND CLEANUP STATUS
 
-Cleanup is driven by **modification time (mtime)** only: a file is removed once 30 days have passed since it was last modified. (Because `/scratch` is mounted `noatime`, access time is not tracked and is ignored.) The checks below therefore test mtime.
+A file is removed only when **both** its last-read time (atime) and its last-write time (mtime) are more than 180 days old. Either one being recent keeps it.
 
 ### Find Files Approaching Deletion
+The simplest way is the report every user can run:
 ```bash
-# Check your personal scratch for files not modified in 23+ days
-# (23 days is when an email warning is sent; 30 days triggers deletion)
-find /scratch/users/$USER/ -type f -mtime +23 -ls
-
-# Find files not modified in 30+ days (eligible for deletion now)
-find /scratch/users/$USER/ -type f -mtime +30
-
-# Check specific shared directories (note: /scratch/datasets is exempt from cleanup)
-find /scratch/shared/ -type f -mtime +23
+scratch-status
 ```
-### View Detailed Modification Information
+It reads the current policy from the cleanup script and lists only files that are genuinely at risk. To check by hand:
 ```bash
-# Detailed listing showing modification times (the default for ls -l)
-ls -la /scratch/users/$USER/
+# Files in your personal scratch that have had no read AND no write for 166+ days
+# (166 days is when the email warning is sent; 180 days triggers deletion)
+find /scratch/users/$USER/ -type f -atime +166 -mtime +166 -ls
+
+# Files eligible for deletion now
+find /scratch/users/$USER/ -type f -atime +180 -mtime +180
+```
+### View Detailed Timestamp Information
+```bash
+# Check exactly when a specific file was last read and last modified
+stat /scratch/users/$USER/my_large_file.dat   # look at the "Access:" and "Modify:" lines
 
 # Sort by modification time, newest last
 ls -ltr /scratch/users/$USER/
-
-# Check exactly when a specific file was last modified
-stat /scratch/users/$USER/my_large_file.dat   # look at the "Modify:" line
 ```
-### Keeping Files Active (Resetting Modification Time)
+### Keeping Files Active
 
-To keep a file, its modification time must be within the last 30 days. Plain `touch` updates the modification time:
+Reading a file resets its clock, so a file you actually use will not be deleted. To keep a file you are not using, `touch` it (this resets both timestamps):
 
 ```bash
-# Touch a file to reset its modification time to now
 touch /scratch/users/$USER/important_dataset.h5
 
-# Recursively refresh modification times for a directory tree
+# Recursively refresh a directory tree
 find /scratch/users/$USER/project_x/ -type f -exec touch {} \;
 ```
 
-Note: opening or reading a file (`cat file > /dev/null`, `touch -a`, etc.) does **not** help — only the modification time matters, and reads aren't tracked under `noatime`. The most reliable way to preserve important data is to move or copy it to a permanent location (your home directory for small files, or `/scratch/datasets/` for large shared files).
+The most reliable way to preserve important data is to move or copy it to a permanent location (your home directory for small files, or `/scratch/datasets/` for large shared files).
 
 # BEST PRACTICES
 Organize by project: 
@@ -114,11 +114,11 @@ Monitor usage regularly:
 du -sh /scratch/users/$USER/
 ```
 
-Set reminders: For important files approaching 30 days (you will also get an automated email warning once a file is 23 days stale)
+Set reminders: For important files approaching 180 days (you will also get an automated email warning once a file has gone 166 days with no read and no write)
 
 # IMPORTANT RULES:
 
-1. Files not **modified** for 30 days will be automatically deleted (reads are not tracked — to keep a file, run plain `touch` on it within the window, or move it somewhere permanent)
+1. Files with no read and no write for 180 days are automatically deleted (to keep a file you are not using, `touch` it within the window, or move it somewhere permanent)
 2. This is NOT a backup location - keep important files elsewhere
 3. Use appropriate subdirectories for your work
 4. Be respectful of shared space

@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake sudo: run the command as-is (tests are never root). Records the call.
+[[ "$1" == "-n" ]] && shift
+printf 'sudo %s\n' "$*" >> "${STUB_CALLS:-/dev/null}"
+exec "$@"

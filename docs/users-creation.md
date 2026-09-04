@@ -1,6 +1,6 @@
 # Users Creation
 
-In order to create a user, use the provided [**add_users.sh**](/scripts/add_users.sh) script.
+In order to create a user, use the provided [**add_users.sh**](/scripts/bin/add_users.sh) script.
 This script can be used in two distinct ways:
 
 1) For bulk users addition, run the following:
@@ -41,7 +41,7 @@ ls /scratch/users
 Where in both cases you should see new folder(s) having the same name of the user(s) just created.
 
 # Users Deletion
-In order to delete a user, use the provided [**delete_users.sh**](/scripts/delete_users.sh) script.
+In order to delete a user, use the provided [**delete_users.sh**](/scripts/bin/delete_users.sh) script.
 This script can be used in two distinct ways:
 
 1) For bulk users deletions, run the following:
