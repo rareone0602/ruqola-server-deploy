@@ -5,6 +5,14 @@
 # at it through its *_DIRS / *_LOG / *_LOCK environment seams, and captures mail
 # in a file. Nothing here touches /scratch, /var/log, /run, or a mail server.
 
+# Never as root. Root ignores the file permissions several tests depend on,
+# and one installer test that expects "refuses without root" would instead
+# install onto the real host. install.sh drops to $SUDO_USER for the tests.
+if (( EUID == 0 )); then
+    echo "REFUSING TO RUN TESTS AS ROOT. Run them as a normal user: tests/run_tests.sh" >&2
+    exit 2
+fi
+
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$TESTS_DIR/.." && pwd)"          # the scripts/ project root
 STUBS="$TESTS_DIR/stubs"

@@ -35,6 +35,11 @@ for f in "$ROOT"/bin/*; do
     check "$(basename "$f") uses the canonical loader" "$([[ "$this" == "$canon" ]] && echo same || echo differs)" "same"
 done
 
+t "Root safety: the suite refuses root, and the installer drops privileges for it"
+check "tests/lib.sh exits 2 when EUID is 0" "$(grep -c 'EUID == 0' "$ROOT/tests/lib.sh")" "1"
+check "install.sh runs the tests as SUDO_USER when root" "$(grep -c 'runuser -u "\$SUDO_USER"' "$ROOT/install.sh")" "1"
+check "install.sh refuses a bare root login for the tests" "$(grep -c 'no SUDO_USER to drop to' "$ROOT/install.sh")" "1"
+
 t "lib/init.sh loads every lib/*.sh file"
 for f in "$ROOT"/lib/*.sh; do
     n=$(basename "$f" .sh); [[ "$n" == init ]] && continue
