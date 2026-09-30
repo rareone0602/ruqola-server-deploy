@@ -3,6 +3,9 @@ Description=Scratch Folder Cleanup Service
 Documentation=man:find(1)
 After=multi-user.target
 Wants=scratch-cleanup.timer
+# Run only with /scratch mounted, never against the empty mount point. This key
+# belongs in [Unit]; in [Service] systemd ignores it (E16).
+RequiresMountsFor=/scratch
 
 [Service]
 Type=oneshot
@@ -17,7 +20,6 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/scratch /var/log /run
-RequiresMountsFor=/scratch
 # msmtp writes a temporary file before sending. ProtectSystem=strict leaves /tmp
 # read-only, so without a private /tmp every warning and deletion mail failed.
 PrivateTmp=true

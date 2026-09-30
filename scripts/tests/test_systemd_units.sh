@@ -15,4 +15,24 @@ t "The reaper's sandbox leaves msmtp somewhere to write"
 check "ProtectSystem is strict (the premise of this test)" "$(unit_value ProtectSystem)" "strict"
 check "PrivateTmp=true gives the unit its own writable /tmp" "$(unit_value PrivateTmp)" "true"
 
+t "systemd reads every line of every unit (E16)"
+# A key in the wrong section is only a warning: systemd ignores the line and the
+# unit still starts. RequiresMountsFor= sat in [Service] from the start, so the
+# reaper never actually required /scratch to be mounted. Any parser message that
+# points at a line of our file fails here. Messages without a line number (such
+# as "Command ... is not executable" on a machine without the scripts installed)
+# are about the machine, not the file, and are ignored.
+if command -v systemd-analyze >/dev/null; then
+    units=("$ROOT"/systemd/*.service "$ROOT"/systemd/*.timer)
+    out=$(systemd-analyze verify --man=no "${units[@]}" 2>&1)
+    for u in "${units[@]}"; do
+        check "no line of $(basename "$u") is ignored or rejected" \
+            "$(grep -F "$u:" <<<"$out" | grep -E "^$u:[0-9]+:" || true)" ""
+    done
+else
+    ok "systemd-analyze is not installed here; unit files not verified"
+fi
+check "RequiresMountsFor= is in [Unit]" \
+    "$(awk '/^\[/{sec=$0} /^RequiresMountsFor=/{print sec}' "$UNIT")" "[Unit]"
+
 finish
