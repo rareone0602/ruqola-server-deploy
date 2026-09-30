@@ -4,23 +4,17 @@ Complete guide for optimizing Hugging Face Transformers on the Ruqola server's H
 
 > **Server hardware (Mjolnir / wsserver1):** 4x NVIDIA H200 NVL, ~140 GiB VRAM each (~564 GB total), compute capability 9.0 (Hopper), CUDA 12.9 (driver 575.57.08), 256 logical CPUs, 755 GiB RAM, Ubuntu 24.04 LTS. GPU indices are `0,1,2,3`. The memory-budget examples below assume ~140 GiB per card with a small headroom reserved.
 
-## 📖 Table of Contents
-
-1. [Setup and Installation](#setup-and-installation)
-2. [H200 Memory Optimization](#h200-memory-optimization)
-3. [Model Loading Strategies](#model-loading-strategies)
-4. [Fine-tuning Large Models](#fine-tuning-large-models)
-5. [Multi-GPU Training](#multi-gpu-training)
-6. [Inference Optimization](#inference-optimization)
-7. [Memory-Efficient Techniques](#memory-efficient-techniques)
-8. [Advanced Features](#advanced-features)
-9. [Example Workflows](#example-workflows)
-
 ## Setup and Installation
 
 ### Recommended Installation
 
+> In the venv, install a CUDA 12.x PyTorch build before transformers (see the [PyTorch guide](pytorch-guide.md)). CUDA 13 builds need a newer driver than this host's 575.57.08 (CUDA 12.9).
+
 ```bash
+# Install into a venv: the system has python3 only, and pip refuses to install outside a venv.
+python3 -m venv ~/venvs/hf
+source ~/venvs/hf/bin/activate
+
 # Install transformers with the PyTorch stack (this guide is PyTorch-only)
 pip install 'transformers[torch,sentencepiece,audio,vision]'
 
@@ -39,20 +33,15 @@ pip install flash-attn --no-build-isolation
 python -c "from transformers import pipeline; print('Transformers ready!')"
 ```
 
-> Install a CUDA 12.x PyTorch wheel that matches the server stack (CUDA 12.9 driver), e.g. a `cu124`+ build, rather than older `cu121` wheels.
-
 ### Environment Setup
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0,1      # outside gpuq only — `gpuq submit` sets this
-                                     # for you (and caps each user at 3 cards)
-export HF_HOME="/path/to/shared/hf"  # Shared HF cache (models + datasets)
-export HF_DATASETS_CACHE="/path/to/shared/datasets"  # Optional: separate datasets cache
+export HF_HOME="/scratch/users/$USER/hf"   # HF cache (models + datasets); keeps them out of your 90 GiB home
 export TOKENIZERS_PARALLELISM=false  # Avoid multiprocessing issues
 ```
 
-> Note: when you submit jobs through `gpuq`, the queue sets `CUDA_VISIBLE_DEVICES` per job to the GPUs you were allocated. Manually exporting it in a `gpuq` job can conflict with the allocation — only set it for ad-hoc runs outside the queue.
+> Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs it gave you. Overriding it runs the job on a card it was not given, and the audit kills it (see the [GPU Queue guide](gpu-queue-guide.md)).
 >
 > `HF_HOME` is the current cache location for both models and datasets. The older `TRANSFORMERS_CACHE` variable is deprecated and ignored in recent transformers releases.
 
@@ -1575,6 +1564,6 @@ if __name__ == "__main__":
 ---
 
 **Next Steps**:
-- For ready-to-use examples: [Example Scripts](../examples/)
+- For ready-to-use examples: [Example Scripts](../examples/README.md)
 - For general best practices: [Best Practices Guide](best-practices.md)
 - For troubleshooting: [Troubleshooting Guide](troubleshooting.md)

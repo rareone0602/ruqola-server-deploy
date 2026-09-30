@@ -2,25 +2,17 @@
 
 Complete guide for optimizing JAX and Flax workflows on the Ruqola server's H200 GPUs.
 
-The Ruqola server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices `0,1,2,3`), each with ~141 GB of VRAM (~564 GB total), compute capability 9.0 (Hopper). The host runs Ubuntu 24.04 with GPU driver 575.57.08 and a CUDA 12.9 driver stack. All "use every GPU" examples below assume 4 devices, but prefer deriving the count dynamically with `len(jax.devices())` instead of hard-coding it.
-
-## Table of Contents
-
-1. [Setup and Installation](#setup-and-installation)
-2. [Basic GPU Usage](#basic-gpu-usage)
-3. [Memory Optimization](#memory-optimization)
-4. [Performance Optimization](#performance-optimization)
-5. [Multi-GPU Training](#multi-gpu-training)
-6. [Large Model Training](#large-model-training)
-7. [Advanced Techniques](#advanced-techniques)
-8. [Debugging and Profiling](#debugging-and-profiling)
-9. [Example Scripts](#example-scripts)
+The Ruqola server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices `0,1,2,3`), each with ~141 GB of VRAM (~564 GB total), compute capability 9.0 (Hopper). The host runs Ubuntu 24.04 with GPU driver 575.57.08 and a CUDA 12.9 driver stack. Inside a gpuq job, `jax.devices()` lists only the cards gpuq gave you (at most 3 per user), so derive the count with `len(jax.devices())` instead of hard-coding it.
 
 ## Setup and Installation
 
 ### Recommended JAX Installation
 
 ```bash
+# Install into a venv: the system has python3 only, and pip refuses to install outside a venv.
+python3 -m venv ~/venvs/jax
+source ~/venvs/jax/bin/activate
+
 # CUDA 12 JAX wheels (server runs CUDA 12.9 driver, H200 sm_90)
 pip install -U "jax[cuda12]"
 
@@ -28,8 +20,9 @@ pip install -U "jax[cuda12]"
 pip install flax optax orbax-checkpoint
 pip install chex ml_collections wandb
 
-# Verify installation
-python -c "import jax; print('JAX version:', jax.__version__); print('Devices:', jax.devices())"
+# Verify installation (through gpuq: JAX grabs 75% of every visible card unless told not to)
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+gpuq submit -m 2 -t 0.1 -- python -c "import jax; print('JAX version:', jax.__version__); print('Devices:', jax.devices())"
 ```
 
 The modern `jax[cuda12]` extra bundles the CUDA libraries as pip wheels, so the
@@ -40,10 +33,13 @@ URL are no longer needed (and have been removed in recent JAX).
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0  # Use first H200, or 0,1,2,3 for all
 export XLA_PYTHON_CLIENT_PREALLOCATE=false  # Dynamic memory allocation
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 ```
+
+> Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs
+> it gave you. Overriding it runs the job on a card it was not given, and the audit kills it
+> (see the [GPU Queue guide](gpu-queue-guide.md)).
 
 ### Verify Installation
 
@@ -464,9 +460,8 @@ tensor-core matmul throughput each, so keeping matmul dimensions as multiples of
 
 ## Multi-GPU Training
 
-The server exposes 4 H200 devices, so prefer `num_devices = len(jax.devices())`
-over a hard-coded count — this keeps your code correct if a card is masked out
-via `CUDA_VISIBLE_DEVICES` or if the hardware changes.
+A gpuq job sees only the cards it was given, so use
+`num_devices = len(jax.devices())` instead of a hard-coded count.
 
 ### Data Parallelism with pmap
 
@@ -630,11 +625,13 @@ yourself if you want a log). It does not write per-job log files.
 
 ```bash
 # Submit a multi-GPU JAX job on 3 H200 cards (the per-user maximum)
+# --gpus 3: 3 whole GPUs (the per-user cap). --memory 100: only cards with >= 100 GB free.
+# --time 16: the job is stopped after 16 hours.
 gpuq submit \
   --command "python train_jax_multi.py --num-devices=3 --model-parallel" \
-  --gpus 3 \           # claim 3 whole GPUs (the per-user card cap; -g 4 is refused)
-  --memory 100 \       # selection floor: only pick GPUs with >= 100 GB FREE VRAM
-  --time 16            # max runtime in hours; the job is killed past this
+  --gpus 3 \
+  --memory 100 \
+  --time 16
 ```
 
 A few things worth knowing about these flags (per `gpuq` itself):
@@ -656,7 +653,7 @@ A few things worth knowing about these flags (per `gpuq` itself):
 
 ```bash
 # Pin specific cards and wait for them if they are busy
-gpuq submit --devices 0,1 --queue -- python train_jax_multi.py --num-devices=2
+gpuq submit --devices 0,1 --queue -m 60 -- python train_jax_multi.py --num-devices=2
 ```
 
 ## Large Model Training
@@ -1314,4 +1311,4 @@ seed = 42
 **Next Steps**:
 - For best practices across frameworks: [Best Practices Guide](best-practices.md)  
 - For troubleshooting: [Troubleshooting Guide](troubleshooting.md)
-- For ready-to-use examples: [Example Scripts](../examples/)
+- For ready-to-use examples: [Example Scripts](../examples/README.md)

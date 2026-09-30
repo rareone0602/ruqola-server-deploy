@@ -4,35 +4,21 @@ Complete guide for optimizing PyTorch workflows on the Ruqola server's H200 GPUs
 
 The server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices 0,1,2,3), each with ~141 GB of VRAM (~564 GB total). They are Hopper-class cards (compute capability 9.0, sm_90). The host runs Ubuntu 24.04 LTS with GPU driver 575.57.08 (CUDA 12.9), 256 logical CPUs, and 755 GiB of system RAM.
 
-## 📖 Table of Contents
-
-1. [Setup and Installation](#setup-and-installation)
-2. [Basic GPU Usage](#basic-gpu-usage)
-3. [Memory Optimization](#memory-optimization)
-4. [Performance Optimization](#performance-optimization)
-5. [Multi-GPU Training](#multi-gpu-training)
-6. [Large Model Training](#large-model-training)
-7. [Advanced Techniques](#advanced-techniques)
-8. [Debugging and Profiling](#debugging-and-profiling)
-9. [Example Scripts](#example-scripts)
-
 ## Setup and Installation
 
 ### Recommended PyTorch Installation
 
 ```bash
-# Current CUDA 12.x PyTorch wheel.
-# The host driver is 575.57.08 (CUDA 12.9), so any cu12x wheel is forward-compatible,
-# and all current PyTorch wheels include Hopper sm_90 kernels for the H200 NVL.
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Install into a venv: the system has python3 only, and pip refuses to install outside a venv.
+python3 -m venv ~/venvs/torch
+source ~/venvs/torch/bin/activate
 
-# Or with conda
-conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+# A CUDA 12.x build. The host driver is 575.57.08 (CUDA 12.9).
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
-> The `cu126`/`cu128` wheels also work and may be preferable for the latest cuDNN/Hopper
-> optimizations — pick whichever the current PyTorch release publishes. Avoid pinning to an
-> old `cu121` build; while it still runs on a 12.9 driver, it leaves Hopper performance on the table.
+> Any `cu12x` index works. CUDA 13 builds need a newer driver than this host has.
+> conda is not installed here.
 
 ### Verify Installation
 
@@ -54,24 +40,21 @@ for i in range(torch.cuda.device_count()):
     print(f"  Multiprocessors: {props.multi_processor_count}")
 ```
 
-On this server you should see 4 GPUs, each reporting ~140 GB and compute capability 9.0.
+Save it as `check_gpu.py` and run it through gpuq: `gpuq submit -m 2 -t 0.1 -- python check_gpu.py`.
+You see only the GPUs gpuq gave you, numbered from 0, each with ~140 GB and compute capability 9.0.
 
 ### Environment Setup
 
 Add to your `~/.bashrc` or job submission script:
 
 ```bash
-# CUDA environment variables for H200
-export CUDA_VISIBLE_DEVICES=0  # outside gpuq only — `gpuq submit` sets this for you
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 ```
 
-> **Caution under gpuq:** Do **not** set `CUDA_VISIBLE_DEVICES` manually when running through
-> `gpuq submit`. gpuq sets it for you to the GPU(s) it allocated, and overriding it makes your job
-> run on a different physical GPU than the one you were granted — `gpuq audit` detects this rebind
-> and will warn (and eventually kill) the job. Set `CUDA_VISIBLE_DEVICES` by hand only for
-> interactive/non-gpuq experiments.
+> Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs
+> it gave you. Overriding it runs the job on a card it was not given, and the audit kills it
+> (see the [GPU Queue guide](gpu-queue-guide.md)).
 
 ## Basic GPU Usage
 
@@ -554,7 +537,7 @@ trainer.train()
 ```
 
 > Set the Hugging Face cache via `HF_HOME` (the old `TRANSFORMERS_CACHE` is deprecated), e.g.
-> `export HF_HOME=/path/to/large/scratch/hf_cache` so model downloads land on a roomy filesystem.
+> `export HF_HOME=/scratch/users/$USER/hf`, so model downloads do not fill your home quota.
 
 ## Advanced Techniques
 
@@ -925,4 +908,4 @@ echo "Job finished! Check current state any time with: gpuq status"
 **Next Steps**:
 - For TensorFlow usage: [TensorFlow with H200 Guide](tensorflow-guide.md)
 - For multi-framework comparisons: [Best Practices Guide](best-practices.md)
-- For ready-to-use examples: [Example Scripts](../examples/)
+- For ready-to-use examples: [Example Scripts](../examples/README.md)

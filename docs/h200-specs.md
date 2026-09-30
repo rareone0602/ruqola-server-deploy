@@ -2,17 +2,6 @@
 
 Technical specifications and optimization guidelines for the NVIDIA H200 NVL Tensor Core GPUs in the Ruqola server.
 
-## 📖 Table of Contents
-
-1. [Host and Software Summary](#host-and-software-summary)
-2. [Hardware Specifications](#hardware-specifications)
-3. [Memory Architecture](#memory-architecture)
-4. [Compute Capabilities](#compute-capabilities)
-5. [Performance Characteristics](#performance-characteristics)
-6. [Optimization Guidelines](#optimization-guidelines)
-7. [Comparison with Other GPUs](#comparison-with-other-gpus)
-8. [Best Use Cases](#best-use-cases)
-
 ## Host and Software Summary
 
 A quick reference for the live Ruqola server (host `wsserver1`, the NTU "Mjolnir" machine). These are the authoritative numbers — always prefer a live `nvidia-smi` over any datasheet figure if they ever disagree.
@@ -28,7 +17,7 @@ A quick reference for the live Ruqola server (host `wsserver1`, the NTU "Mjolnir
 | **System RAM** | 755 GiB |
 | **Operating system** | Ubuntu 24.04.4 LTS |
 
-> A 4th GPU was added on 2025-06-10. The server now has **exactly 4 GPUs**; older docs that say "3" are out of date. The hardware indices are `0,1,2,3` — but note that gpuq caps each user at **3 concurrent cards**, so no single user can claim all four through the queue (`gpuq submit -g 4` is refused; `-g 3` is the per-user maximum).
+> gpuq gives one user at most **3** of the 4 cards at a time. All 4 cards are linked to each other by NVLink (`nvidia-smi topo -m` shows `NV6` for every pair).
 
 ## Hardware Specifications
 
@@ -379,7 +368,7 @@ models_by_memory = {
    model = AutoModelForCausalLM.from_pretrained(
        "meta-llama/Llama-2-70b-hf",
        torch_dtype=torch.float16,
-       device_map="auto",  # spreads layers across GPUs 0,1,2,3
+       device_map="auto",  # spreads layers across the GPUs gpuq gave you
    )
    ```
 
@@ -393,7 +382,7 @@ models_by_memory = {
 3. **Scientific Computing**:
    ```python
    # Large-scale numerical simulations (size grids to fit one card's ~141 GB,
-   # or shard across the 4 GPUs for bigger problems)
+   # or shard across several cards, up to 3 per user, for bigger problems)
    simulation_grid = torch.zeros(4096, 4096, 1024, device='cuda')
    ```
 

@@ -4,23 +4,15 @@ Complete guide for optimizing TensorFlow and Keras workflows on the Ruqola serve
 
 The Ruqola server (host `wsserver1`, the NTU "Mjolnir" box) has **4 x NVIDIA H200 NVL** GPUs at indices `0,1,2,3`, each with ~141 GB VRAM (~564 GB total), compute capability **9.0** (Hopper). The host runs Ubuntu 24.04, GPU driver 575.57.08, CUDA (driver) 12.9.
 
-## 📖 Table of Contents
-
-1. [Setup and Installation](#setup-and-installation)
-2. [Basic GPU Usage](#basic-gpu-usage)
-3. [Memory Optimization](#memory-optimization)
-4. [Performance Optimization](#performance-optimization)
-5. [Multi-GPU Training](#multi-gpu-training)
-6. [Large Model Training](#large-model-training)
-7. [Advanced Techniques](#advanced-techniques)
-8. [Debugging and Profiling](#debugging-and-profiling)
-9. [Example Scripts](#example-scripts)
-
 ## Setup and Installation
 
 ### Recommended TensorFlow Installation
 
 ```bash
+# Install into a venv: the system has python3 only, and pip refuses to install outside a venv.
+python3 -m venv ~/venvs/tf
+source ~/venvs/tf/bin/activate
+
 # Current TensorFlow with bundled CUDA libraries (recommended for H200).
 # The [and-cuda] extra self-selects a matching CUDA 12.x + cuDNN; you do not
 # pin the CUDA version yourself. The host driver is CUDA 12.9.
@@ -29,8 +21,8 @@ pip install -U "tensorflow[and-cuda]"
 # If you need to pin, use a recent release (>=2.16) for the best Hopper kernels:
 # pip install "tensorflow[and-cuda]>=2.16"
 
-# Verify GPU detection
-python -c "import tensorflow as tf; print('GPUs:', tf.config.list_physical_devices('GPU'))"
+# Verify GPU detection (through gpuq, like any GPU work)
+gpuq submit -m 2 -t 0.1 -- python -c "import tensorflow as tf; print('GPUs:', tf.config.list_physical_devices('GPU'))"
 ```
 
 The H200 reports compute capability **9.0** (Hopper, `sm_90`). Any reasonably current TF 2.x build supports it; newer releases ship better Hopper kernels.
@@ -39,19 +31,14 @@ The H200 reports compute capability **9.0** (Hopper, `sm_90`). Any reasonably cu
 
 ```bash
 # Add to ~/.bashrc or job script
-export CUDA_VISIBLE_DEVICES=0      # outside gpuq only — `gpuq submit` sets this for
-                                   # you; overriding it triggers the rebind detector
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 ```
 
-> **On the shared server, let gpuq pick your GPUs.** When you launch through
-> `gpuq submit`, it sets `CUDA_VISIBLE_DEVICES` for the GPU(s) you were allocated.
-> Do **not** hard-code `CUDA_VISIBLE_DEVICES` over a gpuq allocation — `gpuq audit`
-> watches for jobs running on a GPU other than the one they were assigned (rebind
-> detection) and will flag the override. Only set it manually for quick interactive
-> work outside the queue.
+> Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs
+> it gave you. Overriding it runs the job on a card it was not given, and the audit kills it
+> (see the [GPU Queue guide](gpu-queue-guide.md)).
 
 ### Verify Installation
 
@@ -64,7 +51,7 @@ print('GPU available:', bool(tf.config.list_physical_devices('GPU')))
 
 # List GPUs
 gpus = tf.config.list_physical_devices('GPU')
-print(f"Number of GPUs: {len(gpus)}")  # expect 4 on this server
+print(f"Number of GPUs: {len(gpus)}")  # the number gpuq gave you
 
 for i, gpu in enumerate(gpus):
     print(f"GPU {i}: {gpu}")
@@ -1043,4 +1030,4 @@ echo "TensorFlow job finished. Check live status of other jobs with: gpuq status
 **Next Steps**:
 - For JAX usage: [JAX with H200 Guide](jax-guide.md)
 - For framework comparisons: [Best Practices Guide](best-practices.md)
-- For ready-to-use examples: [Example Scripts](../examples/)
+- For ready-to-use examples: [Example Scripts](../examples/README.md)

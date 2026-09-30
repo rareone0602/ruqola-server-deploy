@@ -2,17 +2,6 @@
 
 This guide covers essential bash commands and concepts for new users of the Ruqola server.
 
-## 📖 Table of Contents
-
-1. [Essential Commands](#essential-commands)
-2. [File and Directory Operations](#file-and-directory-operations)
-3. [Text Processing](#text-processing)
-4. [Process Management](#process-management)
-5. [Environment Variables](#environment-variables)
-6. [SSH and Remote Access](#ssh-and-remote-access)
-7. [Useful Shortcuts](#useful-shortcuts)
-8. [Server-Specific Commands](#server-specific-commands)
-
 ## Essential Commands
 
 ### Navigation and Basic Operations
@@ -220,17 +209,12 @@ echo $HOME                      # /home/username
 echo $PWD                       # current directory
 echo $OLDPWD                    # previous directory
 
-# CUDA-related (for GPU computing)
-# This server has 4 H200 GPUs, indices 0,1,2,3.
-export CUDA_VISIBLE_DEVICES=0,1      # use GPUs 0 and 1 (outside gpuq only —
-                                     # `gpuq submit` sets this for you)
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
+echo $CUDA_VISIBLE_DEVICES       # inside a gpuq job: the GPUs gpuq gave you
 ```
 
-> **Tip:** Prefer letting `gpuq` choose your GPUs over setting
-> `CUDA_VISIBLE_DEVICES` by hand. When you run a job through the queue it sets
-> this variable for you to match the GPU(s) it allocated, which avoids clashing
-> with cards other users already hold.
+> Do not set `CUDA_VISIBLE_DEVICES` yourself. `gpuq submit` sets it for each job
+> to the GPUs it gave you; overriding it gets the job killed (see the
+> [GPU Queue Guide](gpu-queue-guide.md)).
 
 ## SSH and Remote Access
 
@@ -317,9 +301,9 @@ nvidia-smi -q                   # detailed GPU info
 
 # Our custom queue system (gpuq)
 gpuq status                     # check queue and GPU ownership
-gpuq submit -- python train.py  # canonical form; --gpus defaults to 1
-gpuq submit -g 1 -- python train.py        # request 1 GPU explicitly
-gpuq submit --command "python train.py"    # equivalent --command form
+gpuq submit -m 40 -t 8 -- python train.py  # 1 GPU with >= 40 GB free, 8 h limit
+gpuq submit -g 2 -m 40 -- python train.py  # 2 GPUs
+gpuq submit -m 40 --command "python train.py"   # the same, as one string
 gpuq history                    # your recent jobs (runtime, exit code, end reason)
 gpuq quota                      # your rolling 7-day GPU-hours vs budget
 gpuq kill 12345                 # stop a running job or cancel a queued one (ids can be listed)
@@ -328,7 +312,7 @@ gpuq kill --mine                # stop all your running jobs, cancel all your qu
 
 Your job runs in the **foreground** of the terminal — gpuq has no daemon and
 writes no per-job log files, so its output goes straight to your screen. Redirect
-it yourself if you want a log (`gpuq submit -- python train.py > train.log 2>&1`),
+it yourself if you want a log (`gpuq submit -m 40 -- python train.py > train.log 2>&1`),
 and run inside `screen`/`tmux` for long jobs. See the
 [GPU Queue Guide](gpu-queue-guide.md) for full details.
 
@@ -344,19 +328,18 @@ free -h                         # memory usage
 uptime                          # system uptime and load
 ```
 
-### Package Management (if you have sudo access)
+### Python Packages
+
+The system has `python3` but no `python`, and `pip install` only works inside a
+virtual environment. System packages (`apt`) need `sudo`; ask the admin.
 
 ```bash
-# Ubuntu/Debian (this server runs Ubuntu 24.04 LTS)
-apt update                      # update package list
-apt install package-name        # install package
-apt search keyword              # search packages
-
-# Python packages
+python3 -m venv ~/venvs/myenv   # create a venv (once)
+source ~/venvs/myenv/bin/activate   # use it; now `python` and `pip` work
 pip install package-name        # install Python package
 pip install -r requirements.txt # install from requirements file
 pip list                        # list installed packages
-pip show package-name           # show package info
+deactivate                      # leave the venv
 ```
 
 ## Best Practices
@@ -398,7 +381,7 @@ cd directory                    # go somewhere
 cp file.txt backup.txt          # make a copy
 nvidia-smi                      # check GPUs (4x H200)
 gpuq status                     # check queue
-gpuq submit -- python train.py  # run a job (1 GPU by default)
+gpuq submit -m 40 -- python train.py  # run a job on 1 GPU
 top                             # what's running?
 kill PID                        # stop a process
 ```
