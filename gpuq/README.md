@@ -68,7 +68,7 @@ backup as drift; `sudo ./install.sh` there retires it.
 | none, or `--symlink-shared` | symlink to `/var/lib/gpu_queue/gpuq.py` |
 | `--copy-shared` | private copy of `/var/lib/gpu_queue/gpuq.py` |
 | `--copy-from-repo` | private copy of the repo's `userspace.py` |
-| `--publish-shared` | first copy `userspace.py` to `/var/lib/gpu_queue/gpuq.py` (mode `0775`); combines with the others |
+| `--publish-shared` | first copy `userspace.py` to `/var/lib/gpu_queue/gpuq.py` (mode `0755`, so no member can edit it); combines with the others |
 
 **Upgrade every copy at once**, since all share the state files. Symlinks
 follow the shared copy; `--copy-*` installs do not. Check with
