@@ -1,81 +1,61 @@
 # Ruqola Project — Compute Resources
 
-Welcome to the central guide for the compute resources of the NUS / NTU / Oxford
-joint **Ruqola project**. Two servers are available, at different scales:
+The NUS / NTU / Oxford Ruqola project has two servers:
 
 | | **Mjölnir** (NTU) | **The Hopper** (NUS) |
 |---|---|---|
-| Purpose | Light-to-medium experiments, prototyping, exploratory analysis | Heavy, large-scale training and data processing |
-| GPUs | **4× NVIDIA H200 NVL**, ~141 GB each (~564 GB total) | Multi-node H100/H200 cluster (NUS-managed) |
-| Scheduler / sharing | `gpuq` cooperative queue (this guide) | PBS Pro batch scheduler |
-| Access | NTU account on the box (admin-provisioned) | NUS guest account + HPC application + VPN |
-| Start here | [GPU Queue (gpuq) guide](gpu-queue-guide.md) | [Hopper access guide](hopper.md) |
+| Use it for | Everyday experiments and prototyping | Large, long training runs |
+| GPUs | 4× NVIDIA H200 NVL, 143771 MiB (140.4 GiB) each | Multi-node H100/H200 cluster, run by NUS |
+| Scheduler | `gpuq` | PBS Pro |
+| Access | An account from the Mjölnir admin | NUS guest account, HPC application, VPN |
+| Start here | [GPU Queue guide](gpu-queue-guide.md) | [Hopper access guide](hopper.md) |
 
-> This site is the **single source of truth** for using **Mjölnir**. For **Hopper**,
-> it summarizes the access process; current cluster specifics are managed by NUS
-> Research Computing and change over time — confirm them through NUS.
+This site is the reference for how Mjölnir works. For Hopper it covers only
+access; NUS Research Computing owns the details.
 
 ---
 
-## Mjölnir (NTU) — at a glance
+## Mjölnir (NTU)
 
-Mjölnir is the NTU server most Ruqola members use day-to-day. Verified hardware
-(host `wsserver1`):
+Host `wsserver1`: 4× H200 NVL (compute capability 9.0), 256 logical CPUs,
+755 GiB RAM, Ubuntu 24.04.4 LTS, GPU driver 575.57.08, CUDA 12.9.
 
-- **GPUs:** 4× NVIDIA H200 NVL, ~141 GB VRAM each (143 771 MiB), ~564 GB total
-- **Compute capability:** 9.0 (Hopper, GH100)
-- **CPU / RAM:** 256 logical CPUs, 755 GiB system RAM
-- **OS / stack:** Ubuntu 24.04.4 LTS, GPU driver 575.57.08, CUDA 12.9
-- **Storage:** large shared `/scratch` for datasets and virtualenvs (see [Scratch Storage](scratch-folder.md))
-- **Sharing:** the `gpuq` cooperative queue — *you own the GPU(s) allocated to you*
+### The rules
 
-GPU access on Mjölnir is coordinated **cooperatively** by `gpuq` (no hard
-reservation system): you submit jobs through `gpuq`, which assigns you free GPUs,
-and you may stack more of your own jobs on GPUs you already hold. **Always launch
-GPU work through `gpuq`** — a GPU process started outside it gets a warning email
-from `gpuq audit` and is **killed 15 minutes** after first detection. See the
-[GPU Queue guide](gpu-queue-guide.md).
-
-### Policy at a glance (current live settings)
-
-| Policy | Current setting |
+| Rule | Setting |
 |---|---|
-| Wall time per job | **48-hour hard cap** — `-t/--time` may not exceed it; it is also the default, so pass a realistic smaller `-t` |
-| Cards per user | **3 GPUs hard cap**; holding 3 already triggers an admin warning, so treat **2** as the courtesy ceiling |
-| GPU-hour quota | **168 GPU-hours per rolling 7 days** (one H200 running 24/7). Going over never rejects a job — it is **held 15 minutes** at submit and deprioritized |
-| Jobs outside `gpuq` | Warning email at first detection, then **killed 15 minutes later** by the periodic `gpuq audit` sweep |
+| Starting GPU work | Only through `gpuq submit`. Anything else gets a warning email and is killed at the first audit 15 minutes or more later. The audit runs every 15 minutes. |
+| Job time | 48 hours at most (`-t`). Longer work must checkpoint and resubmit. |
+| Cards per user | 3 at once. Holding 3 alerts the admin, so use 2 unless you need 3. |
+| GPU-hours | 168 per user per rolling 7 days. Over that, a new job waits 15 minutes, then runs at low priority. It is never refused. |
+| Home directory | 90 GiB soft, 100 GiB hard disk quota. Check with `quota -s`. |
+| `/scratch` | Files neither read nor modified for 180 days are deleted. `/scratch/datasets` is exempt. |
 
-Full details and the exact lifecycles: [GPU Queue guide](gpu-queue-guide.md) ·
-[Notifications FAQ](notifications-faq.md).
+Details: [GPU Queue guide](gpu-queue-guide.md) · [Scratch Storage](scratch-folder.md) ·
+[Notifications](notifications-faq.md).
 
-### Which Mjölnir doc do I need?
+### Which page do I need?
 
-- New to the shell / the server → [Bash Basics](bash-basics.md), [Best Practices](best-practices.md)
-- Running GPU jobs → **[GPU Queue (gpuq)](gpu-queue-guide.md)**, [Notifications FAQ](notifications-faq.md)
-- Storing data → [Scratch Storage](scratch-folder.md)
-- Framework setup → [PyTorch](pytorch-guide.md) · [TensorFlow](tensorflow-guide.md) · [JAX](jax-guide.md) · [Transformers](transformers-guide.md) · [Examples](../examples/README.md)
-- Hardware detail → [H200 Specs](h200-specs.md)
-- Something broke → [Troubleshooting](troubleshooting.md)
+- First time on the server: [Bash Basics](bash-basics.md), then [Best Practices](best-practices.md)
+- Running GPU jobs: [GPU Queue guide](gpu-queue-guide.md)
+- An email from the server: [Notifications](notifications-faq.md)
+- Storing data: [Scratch Storage](scratch-folder.md)
+- Frameworks: [PyTorch](pytorch-guide.md) · [TensorFlow](tensorflow-guide.md) · [JAX](jax-guide.md) · [Transformers](transformers-guide.md) · [Examples](../examples/README.md)
+- Hardware: [H200 Specs](h200-specs.md)
+- Something broke: [Troubleshooting](troubleshooting.md)
 
 ---
 
-## The Hopper (NUS) — at a glance
+## The Hopper (NUS)
 
-**The Hopper** is NUS's high-performance computing (HPC) cluster, reserved for
-**computationally intensive** experiments and large-scale training. It is a
-multi-node H100/H200 cluster, uses the **PBS Pro** scheduler (not Slurm), and
-requires jobs to run inside **Singularity/Apptainer** containers.
-
-Getting on Hopper is a multi-step NUS process (guest account → activation → HPC
-application → VPN). The full walkthrough is in the **[Hopper access guide](hopper.md)**.
-
-> The official "Hopper Cluster User Guide" is an **NUS-Restricted** document and is
-> not redistributed here. Authorized members can obtain it through NUS channels.
+NUS's HPC cluster for heavy training. It uses the PBS Pro scheduler, and jobs
+run inside Singularity/Apptainer containers. Getting access takes four NUS
+steps; follow the [Hopper access guide](hopper.md). The official "Hopper
+Cluster User Guide" is NUS-Restricted; get it through NUS.
 
 ---
 
 ## Getting help
 
-- Mjölnir usage questions → start with [Troubleshooting](troubleshooting.md) and the [Notifications FAQ](notifications-faq.md).
-- Account / quota issues on Mjölnir → contact the server admin.
-- Hopper / NUS account issues → see the contacts in the [Hopper access guide](hopper.md).
+- Mjölnir: check [Troubleshooting](troubleshooting.md), then contact the Mjölnir admin.
+- Hopper: see the contacts in the [Hopper access guide](hopper.md).
