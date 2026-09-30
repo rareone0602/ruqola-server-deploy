@@ -18,7 +18,9 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/scratch /var/log /run
 RequiresMountsFor=/scratch
-PrivateTmp=false
+# msmtp writes a temporary file before sending. ProtectSystem=strict leaves /tmp
+# read-only, so without a private /tmp every warning and deletion mail failed.
+PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

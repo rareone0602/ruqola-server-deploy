@@ -1,5 +1,14 @@
 #!/bin/bash
 # Fake msmtp: record one record per invocation into $MAIL_CAPTURE.
+#
+# MSMTP_FAIL=<text> makes it fail the way the real one does: "msmtp: <text>" on
+# stderr, nothing sent, exit 74 (EX_IOERR). The live reaper hit exactly this
+# inside its systemd sandbox: "cannot create temporary file: Read-only file system".
+if [[ -n "${MSMTP_FAIL:-}" ]]; then
+  cat >/dev/null
+  printf 'msmtp: %s\n' "$MSMTP_FAIL" >&2
+  exit 74
+fi
 {
   printf '=== SEND recipient=[%s]\n' "$*"
   cat

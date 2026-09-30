@@ -34,7 +34,9 @@ _mail_log() {
 
 # send_mail <to> <subject> <body> [content-type]
 # Returns 1 and sends nothing for an empty recipient. Under DRY_RUN, logs the
-# intent and returns 0 without contacting anyone.
+# intent and returns 0 without contacting anyone. If the mailer fails, logs one
+# ERROR line quoting the mailer's own stderr and returns its exit status, so
+# callers can tell "no address" (check the address first) from "send failed".
 send_mail() {
     local to="$1" subject="$2" body="$3" ctype="${4:-}"
     [[ -n "$to" ]] || return 1
@@ -44,9 +46,16 @@ send_mail() {
     fi
     local -a mailer=("${MSMTP:-/usr/bin/msmtp}")
     (( EUID == 0 )) || mailer=(sudo "${mailer[@]}")
-    {
+    local err rc
+    err=$({
         printf 'To: %s\nFrom: %s\nSubject: %s\n' "$to" "${ADMIN_EMAIL:-mjolnirruqola@gmail.com}" "$subject"
         [[ -n "$ctype" ]] && printf 'Content-Type: %s\n' "$ctype"
         printf '\n%s\n' "$body"
-    } | "${mailer[@]}" "$to"
+    } | "${mailer[@]}" "$to" 2>&1 >/dev/null)
+    rc=$?
+    if (( rc != 0 )); then
+        err=${err//$'\n'/ }
+        _mail_log ERROR "Mail to <$to> failed (mailer exit $rc): ${err:-no error text}"
+    fi
+    return "$rc"
 }

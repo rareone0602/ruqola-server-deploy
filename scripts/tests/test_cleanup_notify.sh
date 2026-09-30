@@ -30,4 +30,28 @@ check "greeting uses the name, not the address" "$(mail_bodies | grep -c '^Hello
 check "exit status 0" "$(reaper_exit)" "0"
 drop_sandbox
 
+
+t "A failing mailer is a failure, logged in its own words, never 'no email address'"
+# Live 2026-09-28..30: msmtp could not write /tmp inside the unit's sandbox, and
+# every night the log blamed the accounts: "No email address on account 'yyq'".
+new_sandbox; add_user alice "Alice Smith,,,,alice@ntu.edu.sg"
+mkfile users/alice/soon.bin 170 170 alice     # inside the warning window
+mkfile users/alice/old.bin  200 200 alice     # past the limit
+MSMTP_FAIL="cannot create temporary file: Read-only file system" run_reaper
+check "nothing blamed on a missing address" "$(reaper_log | grep -c 'No email address')" "0"
+check "the mailer's own error reaches the log (both digests)" \
+    "$(reaper_log | grep -c 'cannot create temporary file: Read-only file system')" "2"
+check "warning digest: who, where, and what was lost" \
+    "$(reaper_log | grep -c "Mail to alice <alice@ntu.edu.sg> failed; 1 warning(s) undelivered")" "1"
+check "deletion digest: same" \
+    "$(reaper_log | grep -c "Mail to alice <alice@ntu.edu.sg> failed; 1 deletion(s) unreported")" "1"
+check "deletion policy unchanged: the expired file is still removed" "$(present "$SB/scratch/users/alice/old.bin")" "gone"
+check "exit 1, so systemd marks the run failed" "$(reaper_exit)" "1"
+drop_sandbox
+
+t "No address is still a warning, not a failure"
+new_sandbox; add_user nobody "No Email Person"; mkfile users/nobody/old.bin 200 200 nobody; run_reaper
+check "exit 0 when the only problem is a missing address" "$(reaper_exit)" "0"
+drop_sandbox
+
 finish

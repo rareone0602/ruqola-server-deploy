@@ -103,10 +103,12 @@ notify_imminent_deletion() {
         fi
     done < <(find_in_window "$scratch_dir")
 
-    local u to name
+    local u to name mail_failed=0
     for u in "${!warn_list[@]}"; do
         to=$(email_for_user "$u"); name=$(full_name_for_user "$u")
-        if send_mail "$to" "Imminent removal: ${warn_count[$u]} file(s) under ${scratch_dir}" "Hello ${name},
+        if [[ -z "$to" ]]; then
+            log_message WARN "No email address on account '$u'; ${warn_count[$u]} warning(s) undelivered"
+        elif send_mail "$to" "Imminent removal: ${warn_count[$u]} file(s) under ${scratch_dir}" "Hello ${name},
 
 This is an automated notification from the server.
 
@@ -121,10 +123,10 @@ ${warn_min[$u]} day(s).
 Thank you,
 System Administrator"
         then log_message INFO "Warning digest sent to $u <$to> (${warn_count[$u]} file(s))"
-        else log_message WARN "No email address on account '$u'; ${warn_count[$u]} warning(s) undelivered"
+        else log_message ERROR "Mail to $u <$to> failed; ${warn_count[$u]} warning(s) undelivered"; mail_failed=1
         fi
     done
-    return 0
+    return "$mail_failed"
 }
 
 # ---------------------------------------------------------------------------
@@ -172,7 +174,9 @@ clean_directory() {
     local u to name
     for u in "${!user_list[@]}"; do
         to=$(email_for_user "$u"); name=$(full_name_for_user "$u")
-        if send_mail "$to" "Scratch cleanup: ${user_count[$u]} file(s) removed" "Hello ${name},
+        if [[ -z "$to" ]]; then
+            log_message WARN "No email address on account '$u'; ${user_count[$u]} deletion(s) unreported"
+        elif send_mail "$to" "Scratch cleanup: ${user_count[$u]} file(s) removed" "Hello ${name},
 
 This is an automated notification from the server.
 
@@ -187,7 +191,7 @@ directory.
 Thank you,
 System Administrator"
         then log_message INFO "Deletion digest sent to $u <$to> (${user_count[$u]} file(s))"
-        else log_message WARN "No email address on account '$u'; ${user_count[$u]} deletion(s) unreported"
+        else log_message ERROR "Mail to $u <$to> failed; ${user_count[$u]} deletion(s) unreported"; errors=$((errors + 1))
         fi
     done
 

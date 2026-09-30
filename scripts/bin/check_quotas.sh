@@ -1,6 +1,6 @@
 #!/bin/bash
 # check_quotas.sh -- email users whose home directory is over its soft disk quota.
-# Run by an administrator; repquota needs root. Not scheduled on this host.
+# repquota needs root. On this host root's crontab runs it daily at 02:00.
 #
 #   sudo check_quotas.sh             # notify
 #   sudo check_quotas.sh --dry-run   # show who would be notified, send nothing
@@ -29,7 +29,7 @@ over_block_soft_limit() {
 }
 
 main() {
-    local user used soft hard to name notified=0 skipped=0
+    local user used soft hard to name notified=0 skipped=0 failed=0
     local rows
     if ! rows=$(over_block_soft_limit); then
         echo "check_quotas.sh: repquota failed (run as root?)" >&2; exit 1
@@ -37,7 +37,9 @@ main() {
     while read -r user used soft hard; do
         [[ -n "$user" ]] || continue
         to=$(email_for_user "$user"); name=$(full_name_for_user "$user")
-        if send_mail "$to" "$SUBJECT" "Hello ${name},
+        if [[ -z "$to" ]]; then
+            echo "WARNING: no email address on account '$user'; not notified" >&2; skipped=$((skipped + 1))
+        elif send_mail "$to" "$SUBJECT" "Hello ${name},
 
 This is an automated notification from the server.
 Your home directory is over its allocated disk quota.
@@ -53,10 +55,11 @@ System Administrator"
         then
             echo "Quota warning: $user <$to>"; notified=$((notified + 1))
         else
-            echo "WARNING: no email address on account '$user'; not notified" >&2; skipped=$((skipped + 1))
+            echo "ERROR: mail to '$user' <$to> failed; not notified" >&2; failed=$((failed + 1))
         fi
     done <<<"$rows"
-    echo "$notified notified, $skipped without an address"
+    echo "$notified notified, $skipped without an address$( (( failed )) && printf ', %d failed' "$failed")"
+    (( failed == 0 ))
 }
 
 usage() {

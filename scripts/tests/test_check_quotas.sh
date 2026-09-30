@@ -60,4 +60,18 @@ run_quotas --help
 check "--help -> exit 0" "$(cat "$SB/exit")" "0"
 drop_sandbox
 
+
+t "A failing mailer is counted as failed, not as 'without an address'"
+new_sandbox; report
+add_user alice "Alice Smith,,,,alice@ntu.edu.sg"
+add_user helen "helenfan27@gmail.com"
+add_user bob   "Bob Nobody"
+MSMTP_FAIL="cannot create temporary file: Read-only file system" run_quotas
+check "nothing sent" "$(mail_count)" "0"
+check "alice's failure names her and her address" "$(grep -c "mail to 'alice' <alice@ntu.edu.sg> failed" "$SB/err")" "1"
+check "bob is still the only one without an address" "$(grep -c 'no email address on account' "$SB/err")" "1"
+check "summary counts the failures" "$(grep -c '^0 notified, 1 without an address, 2 failed$' "$SB/out")" "1"
+check "exit 1" "$(cat "$SB/exit")" "1"
+drop_sandbox
+
 finish

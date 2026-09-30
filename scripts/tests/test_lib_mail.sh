@@ -45,4 +45,14 @@ check "Content-Type header emitted when asked" "$(mail_bodies | grep -c '^Conten
 check "msmtp was run through sudo (config is root-only)" "$(grep -c "^sudo .*msmtp a@b.co" "$STUB_CALLS")" "1"
 drop_sandbox
 
+
+t "send_mail: a failing mailer is reported, in the mailer's own words"
+new_sandbox
+MSMTP_FAIL="cannot create temporary file: Read-only file system" \
+    with_stubs bash -c 'source "$0/init.sh"; MSMTP="$1"; send_mail a@b.co "subj" "body"' "$ROOT/lib" "$STUBS/msmtp" 2>"$SB/err"
+check "failing mailer -> non-zero, nothing sent" "$(( $? != 0 ))/$(mail_count)" "1/0"
+check "one ERROR line names the recipient and quotes the mailer" \
+    "$(grep -c 'ERROR.*Mail to <a@b.co> failed (mailer exit 74): msmtp: cannot create temporary file: Read-only file system' "$SB/err")" "1"
+drop_sandbox
+
 finish
