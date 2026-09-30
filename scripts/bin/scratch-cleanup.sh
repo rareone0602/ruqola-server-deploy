@@ -68,6 +68,21 @@ STALE_EMPTY_DIR=( -type d -empty -mtime +"$DAYS_TO_KEEP" )
 # printing a FIND_RECORD per match; LC_ALL=C keeps the stderr text parseable.
 find_act() { LC_ALL=C find "$1" -ignore_readdir_race "${@:2}" -printf "$FIND_RECORD"; }
 
+# A digest lists at most this many paths, then a count and how to see the rest.
+# Gmail refuses a message over 25 MB; the December 2026 cohort alone would have
+# been one 300,000-line mail (todo E7, E18).
+DIGEST_MAX_FILES=100
+
+# Per-owner lists live in files, one line per entry (escape_path, lib/fs.sh). A
+# bash string grown with += is copied on every append, so a 300,000-file list
+# cost about half an hour and most of the unit's one-hour limit (todo E18).
+
+# more_line <count> <how to see the rest>: the digest's closing line, if it needs one.
+more_line() {
+    (( $1 > DIGEST_MAX_FILES )) || return 0
+    printf '  ... and %d more. %s\n' "$(( $1 - DIGEST_MAX_FILES ))" "$2"
+}
+
 manifest_file() { local m; printf -v m '%(%Y-%m)T' -1; printf '%s/deleted-%s.tsv' "$MANIFEST_DIR" "$m"; }
 
 validate_directory() {
@@ -89,8 +104,9 @@ preserve_args() {
 # ---------------------------------------------------------------------------
 notify_imminent_deletion() {
     local scratch_dir="$1"
-    local -A warn_list warn_count warn_min
+    local -A warn_count warn_min
     validate_directory "$scratch_dir" || return 1
+    local lists; lists=$(mktemp -d) || { log_message ERROR "mktemp failed; no warnings for $scratch_dir"; return 1; }
 
     local now owner size atime mtime path newest elapsed_days days_remaining
     printf -v now '%(%s)T' -1
@@ -102,16 +118,22 @@ notify_imminent_deletion() {
         elapsed_days=$(( (now - newest) / 86400 ))
         days_remaining=$(( DAYS_TO_KEEP - elapsed_days ))
         (( days_remaining < 0 )) && days_remaining=0
-        warn_list[$owner]+="  ${path} (${days_remaining} day(s) remaining)"$'\n'
+        escape_path "$path"
+        printf '%s\t%s\n' "$days_remaining" "$ESCAPED" >> "$lists/$owner"
         warn_count[$owner]=$(( ${warn_count[$owner]:-0} + 1 ))
         if [[ -z "${warn_min[$owner]:-}" ]] || (( days_remaining < warn_min[$owner] )); then
             warn_min[$owner]=$days_remaining
         fi
     done < <(find_act "$scratch_dir" "${IN_WINDOW[@]}" 2>/dev/null)
 
-    local u to name mail_failed=0
-    for u in "${!warn_list[@]}"; do
+    local u to name mail_failed=0 shown
+    for u in "${!warn_count[@]}"; do
         to=$(email_for_user "$u"); name=$(full_name_for_user "$u")
+        # Most urgent first.
+        shown=$(sort -t $'\t' -k1,1n "$lists/$u" | head -n "$DIGEST_MAX_FILES" \
+                | awk -F'\t' '{printf "  %s (%s day(s) remaining)\n", $2, $1}')
+        shown+=$'\n'$(more_line "${warn_count[$u]}" "List them all with:
+  find ${scratch_dir} -user ${u} -type f -atime +${DAYS_TO_NOTIFY} -mtime +${DAYS_TO_NOTIFY}")
         if [[ -z "$to" ]]; then
             log_message WARN "No email address on account '$u'; ${warn_count[$u]} warning(s) undelivered"
         elif send_mail "$to" "Imminent removal: ${warn_count[$u]} file(s) under ${scratch_dir}" "Hello ${name},
@@ -122,7 +144,7 @@ The following ${warn_count[$u]} file(s) have gone more than ${DAYS_TO_NOTIFY} da
 without being modified or accessed. Files under /scratch/ (except
 /scratch/datasets/) are removed after ${DAYS_TO_KEEP} days.
 
-${warn_list[$u]}
+${shown}
 To keep them, modify them or copy them somewhere permanent within
 ${warn_min[$u]} day(s).
 
@@ -132,6 +154,7 @@ System Administrator"
         else log_message ERROR "Mail to $u <$to> failed; ${warn_count[$u]} warning(s) undelivered"; mail_failed=1
         fi
     done
+    rm -rf -- "$lists"
     return "$mail_failed"
 }
 
@@ -141,7 +164,7 @@ System Administrator"
 clean_directory() {
     local scratch_dir="$1"
     local files_removed=0 dirs_removed=0 total_size=0 errors=0
-    local -A user_list user_bytes user_count
+    local -A user_bytes user_count
     validate_directory "$scratch_dir" || return 1
 
     log_message INFO "Cleaning directory: $scratch_dir (older than $DAYS_TO_KEEP days)"
@@ -155,8 +178,9 @@ clean_directory() {
         return 1
     fi
 
-    # find's stderr, kept to count the deletions that failed.
-    local errlog; errlog=$(mktemp) || { log_message ERROR "mktemp failed; skipping $scratch_dir"; return 1; }
+    # find's stderr, kept to count the deletions that failed; per-owner lists.
+    local work; work=$(mktemp -d) || { log_message ERROR "mktemp failed; skipping $scratch_dir"; return 1; }
+    local errlog="$work/find.err" lists="$work/lists"; mkdir "$lists"
     local delete=(-delete); [[ -n "$DRY_RUN" ]] && delete=()
 
     local owner size atime mtime path line
@@ -170,7 +194,8 @@ clean_directory() {
         fi
         files_removed=$((files_removed + 1)); total_size=$((total_size + size))
         if [[ -n "$owner" ]]; then
-            user_list[$owner]+="  ${path} (${size} bytes)"$'\n'
+            escape_path "$path"
+            printf '  %s (%s bytes)\n' "$ESCAPED" "$size" >> "$lists/$owner"
             user_bytes[$owner]=$(( ${user_bytes[$owner]:-0} + size ))
             user_count[$owner]=$(( ${user_count[$owner]:-0} + 1 ))
         fi
@@ -185,9 +210,11 @@ clean_directory() {
     done < "$errlog"
 
     # One digest per owner per run, never one message per file.
-    local u to name
-    for u in "${!user_list[@]}"; do
+    local u to name shown
+    for u in "${!user_count[@]}"; do
         to=$(email_for_user "$u"); name=$(full_name_for_user "$u")
+        shown=$(head -n "$DIGEST_MAX_FILES" "$lists/$u")
+        shown+=$'\n'$(more_line "${user_count[$u]}" "The server keeps a record of every deleted file; ask the administrator for the full list.")
         if [[ -z "$to" ]]; then
             log_message WARN "No email address on account '$u'; ${user_count[$u]} deletion(s) unreported"
         elif send_mail "$to" "Scratch cleanup: ${user_count[$u]} file(s) removed" "Hello ${name},
@@ -198,7 +225,7 @@ The following ${user_count[$u]} file(s) under ${scratch_dir} were removed becaus
 they were neither modified nor accessed in the last ${DAYS_TO_KEEP} days
 (total $(format_bytes "${user_bytes[$u]}")):
 
-${user_list[$u]}
+${shown}
 To keep files permanently, store them under /scratch/datasets/ or in your home
 directory.
 
@@ -237,7 +264,7 @@ System Administrator"
     while IFS= read -r line; do
         log_message DEBUG "Could not remove directory: ${line#*: cannot delete }"
     done < "$errlog"
-    rm -f -- "$errlog"
+    rm -rf -- "$work"
 
     log_message INFO "Cleanup summary for $scratch_dir: $files_removed file(s) removed ($(format_bytes "$total_size")), $dirs_removed directory(ies) removed, $errors error(s)"
     (( errors == 0 ))

@@ -29,10 +29,11 @@ read_record() {
 # Tabs, newlines and backslashes inside a path are escaped as \t \n \\ so a
 # line is always exactly seven fields.
 
-manifest_escape() {
-    local p="$1"
-    p=${p//\\/\\\\}; p=${p//$'\t'/\\t}; p=${p//$'\n'/\\n}
-    printf '%s' "$p"
+# escape_path <path>: set ESCAPED to the path on one line, with tab, newline and
+# backslash written as \t \n \\. It sets a variable instead of printing, so no
+# caller needs a $(...) subshell: that would be a fork per file (todo E18).
+escape_path() {
+    ESCAPED=${1//\\/\\\\}; ESCAPED=${ESCAPED//$'\t'/\\t}; ESCAPED=${ESCAPED//$'\n'/\\n}
 }
 
 # manifest_open <file>: create parent directory and header if missing; verify
@@ -55,5 +56,6 @@ manifest_record() {
     printf -v now '%(%Y-%m-%dT%H:%M:%S%z)T' -1
     printf -v la  '%(%Y-%m-%d)T' "$atime"
     printf -v lm  '%(%Y-%m-%d)T' "$mtime"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$kind" "$owner" "$bytes" "$la" "$lm" "$(manifest_escape "$path")" >> "$file"
+    escape_path "$path"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$kind" "$owner" "$bytes" "$la" "$lm" "$ESCAPED" >> "$file"
 }
