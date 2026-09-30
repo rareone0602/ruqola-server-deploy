@@ -5,6 +5,11 @@
 # rotated by automation. The script used to rotate this log itself, at 10 MB
 # with one generation, which kept about four nights of history.
 /var/log/scratch-cleanup.log {
+    # /var/log is root:syslog 775, and logrotate as root refuses a group-writable
+    # parent unless told whom to rotate as. /etc/logrotate.conf says this for
+    # every snippet; saying it here too keeps this file valid when it is read
+    # alone, which is how install.sh checks it.
+    su root adm
     weekly
     maxsize 50M
     rotate 12

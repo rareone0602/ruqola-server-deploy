@@ -12,6 +12,7 @@
 #
 # Seams used by the tests: RUQOLA_ADMIN_DESTROOT (prefix for every destination),
 # RUQOLA_ADMIN_BACKUP_ROOT, RUQOLA_ADMIN_MANIFEST, RUQOLA_ADMIN_SKIP_TESTS=1,
+# RUQOLA_ADMIN_TEST_RUNNER (the suite to run instead of tests/run_tests.sh),
 # RUQOLA_ADMIN_NO_CHOWN=1; systemctl is found on PATH.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -195,7 +196,8 @@ check_all() {
 
 run_tests() {
     [[ -n "${RUQOLA_ADMIN_SKIP_TESTS:-}" ]] && { say "   (tests skipped by request)"; return 0; }
-    local log="$TMP/tests.log" -a runner=()
+    local log="$TMP/tests.log" suite="${RUQOLA_ADMIN_TEST_RUNNER:-$HERE/tests/run_tests.sh}"
+    local -a runner=()
     # The suite refuses to run as root (see tests/lib.sh). Under sudo, run it as
     # the person who typed sudo; as a bare root login there is nobody to drop to.
     if (( EUID == 0 )); then
@@ -204,7 +206,7 @@ run_tests() {
         if command -v runuser >/dev/null; then runner=(runuser -u "$SUDO_USER" --); else runner=(sudo -u "$SUDO_USER" --); fi
         say "   running as $SUDO_USER"
     fi
-    if "${runner[@]}" "$HERE/tests/run_tests.sh" >"$log" 2>&1; then tail -1 "$log" | sed 's/^/   /'
+    if "${runner[@]}" "$suite" >"$log" 2>&1; then tail -1 "$log" | sed 's/^/   /'
     else cat "$log"; die "tests failed; nothing installed"; fi
 }
 

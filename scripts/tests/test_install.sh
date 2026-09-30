@@ -10,7 +10,26 @@ inst() {   # run install.sh against the sandbox with every seam set
         bash "$INSTALL" "$@" >"$SB/out" 2>"$SB/err"; echo $? > "$SB/exit"
 }
 out() { sed 's/\x1b\[[0-9;]*m//g' "$SB/out"; }   # colour codes stripped
+inst_tested() {   # like inst, but the test step runs: a stand-in suite that prints $1 and exits $2
+    printf '#!/bin/bash\necho "%s"\nexit %s\n' "$1" "$2" > "$SB/suite"; chmod +x "$SB/suite"; shift 2
+    PATH="$STUBS:$PATH" RUQOLA_ADMIN_DESTROOT="$SB/root" RUQOLA_ADMIN_BACKUP_ROOT="$SB/backups" \
+    RUQOLA_ADMIN_TEST_RUNNER="$SB/suite" RUQOLA_ADMIN_NO_CHOWN=1 \
+        bash "$INSTALL" "$@" >"$SB/out" 2>"$SB/err"; echo $? > "$SB/exit"
+}
 BIN="$SB/root/usr/local/bin"; LIB="$SB/root/usr/local/lib/ruqola-admin"
+
+t "The test step runs the suite, shows its total, and blocks the install when it fails"
+new_sandbox
+inst_tested "=== TOTAL: 7 passed, 0 failed ===" 0 --yes
+check "exit 0" "$(cat "$SB/exit")" "0"
+check "the suite's total is shown" "$(out | grep -c 'TOTAL: 7 passed, 0 failed')" "1"
+check "no shell errors (was: local: \`-a': not a valid identifier)" "$(cat "$SB/err")" ""
+drop_sandbox; new_sandbox
+inst_tested "=== TOTAL: 6 passed, 1 failed ===" 1 --yes
+check "a failing suite stops the install" "$(cat "$SB/exit")" "1"
+check "...and says so" "$(sed 's/\x1b\[[0-9;]*m//g' "$SB/out" "$SB/err" | grep -c 'tests failed; nothing installed')" "1"
+check "...before anything is installed" "$(present "$SB/root/usr/local/bin/scratch-cleanup.sh")" "gone"
+drop_sandbox
 
 t "--check on an empty host: everything missing, exit 1"
 new_sandbox; BIN="$SB/root/usr/local/bin"; LIB="$SB/root/usr/local/lib/ruqola-admin"
