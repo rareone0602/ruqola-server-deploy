@@ -38,7 +38,7 @@ kill. Act on the warning at once.
 
 | Subject | Why |
 |---|---|
-| `Imminent removal: <n> file(s) under /scratch/users` | Files that have gone 166 days with no read and no write. They are deleted when they reach 180 days, about 14 days later. The email lists each file and the days left. |
+| `Imminent removal: <n> file(s) under <dir>` | Files that have gone 166 days with no read and no write. They are deleted when they reach 180 days, about 14 days later. The email lists each file and the days left. |
 | `Scratch cleanup: <n> file(s) removed` | Files deleted after 180 days with no read and no write, with their sizes. |
 
 - You get at most one email of each kind per directory (`/scratch/users`,

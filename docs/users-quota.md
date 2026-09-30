@@ -37,8 +37,8 @@ du -h --max-depth=1 ~ | sort -hr | head -20
 Common culprits:
 
 - `~/.cache/pip`: clear it with `pip cache purge`.
-- `~/.cache/huggingface`: move it to scratch with
-  `export HF_HOME=/scratch/users/$USER/hf` in `~/.bashrc`.
+- `~/.cache/huggingface`: set `export HF_HOME=/scratch/users/$USER/hf` in
+  `~/.bashrc`, then move the old folder's contents there.
 - Checkpoints and datasets: move them to `/scratch/users/$USER/`.
 
 ## Email warning

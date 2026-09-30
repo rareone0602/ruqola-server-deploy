@@ -17,7 +17,7 @@ Find the job in `gpuq history` and read its RESULT:
 | RESULT | What happened | Fix |
 |---|---|---|
 | `timed_out` | It hit its `-t` limit. | Resubmit with a larger `-t` (at most 48). Save checkpoints so long runs can resume. |
-| `killed` | A signal ended it: `gpuq kill`, Ctrl-C, or a closed terminal or dropped SSH session. | Run jobs inside `tmux` or `screen`. |
+| `killed` | A signal ended it: `gpuq kill`, Ctrl-C, a closed terminal or dropped SSH session, or the kernel running out of RAM. | Run jobs inside `tmux` or `screen`. If none of these fits, ask the admin to check the kernel log. |
 | `failed` | Your program exited with an error. | Read the output you saved. Look for a Python traceback or `CUDA out of memory`. |
 | `lost*` | The `gpuq submit` process itself died. | Run inside `tmux`; resubmit. |
 
@@ -65,7 +65,8 @@ CUDA 12 build.
 - **`Disk quota exceeded` in your home:** the limit is 90 GiB soft, 100 GiB hard.
   Run `quota -s`, then find what is big with `du -h --max-depth=1 ~ | sort -hr | head`.
   Common culprits are `~/.cache/pip` (clear with `pip cache purge`) and
-  `~/.cache/huggingface` (move it: `export HF_HOME=/scratch/users/$USER/hf`).
+  `~/.cache/huggingface` (set `export HF_HOME=/scratch/users/$USER/hf` in `~/.bashrc`,
+  then move the old folder's contents there).
 - **A file vanished from `/scratch`:** it may have hit the scratch deletion rule.
   See [Scratch Storage](scratch-folder.md); the admin can check the deletion log.
 
