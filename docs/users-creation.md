@@ -52,18 +52,21 @@ delete_users.sh users.csv --no-backup      # also: --csv users.csv --no-backup
 ```
 
 Only the first CSV column (`username`) is read; the header line is skipped. The
-script asks once, `y` to go on. Then, for each user, it kills their processes,
-removes their quota, deletes `/scratch/users/<user>`, and removes the account
-and home directory.
+script lists the accounts and asks once, `y` to go on. Then, for each user, it
+kills their processes, removes their quota, deletes `/scratch/users/<user>`, and
+removes the account and home directory.
 
 Unless you pass `--no-backup`, it first copies the home and scratch directories
-to `/var/backups/deleted_users/<user>_<timestamp>/`.
+to `/var/backups/deleted_users/<user>_<timestamp>/`. That is on the root
+filesystem.
 
-**Check the list before you confirm.** The script has no guard against system
-or admin accounts: it will delete any account named in the list, and one `y`
-covers the whole CSV. Also:
+It refuses, and deletes nobody, if any name in the list is:
 
-- The backup lands on the root filesystem. Check the size first:
-  `sudo du -sh /scratch/users/<user>`.
-- A failed backup copy is logged as a warning, and the deletion still goes on.
-  Check the backup folder before you rely on it.
+- a system account: uid below 1000 or above 60000 (`root`, `ollama`, `nobody`);
+- an admin: a member of `sudo` or `admin`. To delete a former admin, first run
+  `sudo gpasswd -d <user> sudo`;
+- not a valid username (often a shifted CSV column).
+
+A user whose backup fails, or would leave less than 10 GiB free on `/`, is not
+deleted; the others still are. The run exits non-zero if any user was not deleted.
+Everything is logged to `/var/log/user_deletion.log`.
