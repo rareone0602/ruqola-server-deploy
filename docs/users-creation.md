@@ -1,80 +1,69 @@
 # Users Creation
 
-In order to create a user, use the provided [**add_users.sh**](/scripts/bin/add_users.sh) script.
-This script can be used in two distinct ways:
-
-1) For bulk users addition, run the following:
-```bash
-add_users.sh users.csv
-```
-where users.csv is a CSV file with columns named as follows:
-- username: the username of each user to be created
-- password: the provisional password for each user (the password will be changed at the first login as explained below)
-- full_name: the full name of each user
-- email: the email address of each user
-
-2) For single user addition, run the following:
-```bash
-add_users.sh --single username password full_name email
-```
-where the various arguments are defined as of point 1. Be careful at this stage to include the full name within "" if the name includes white spaces.
-For example:
-```bash
-add_users.sh --single testuser some_password "A Test User" email@gmail.com
-```
-
-After having set up the user(s), all the information associated with the user can be assessed with:
-```bash
-getent passwd username
-```
-
-Also, at this stage it is important to ensure that all the relevant folders to be used by the user both in /home/ and in /scratch/users have been created.
+Create accounts with [**add_users.sh**](/scripts/bin/add_users.sh) (also on the
+host as `create_users`). Run it as a sudoer, not as root; it refuses root.
 
 ```bash
-ls /home/
+add_users.sh users.csv                                           # many users
+add_users.sh --single testuser some_password "A Test User" email@gmail.com   # one user
 ```
+
+The CSV needs a header line, which is skipped, then one user per line with the
+columns in this order: `username,password,full_name,email`. Usernames must start
+with a lowercase letter and contain only lowercase letters, digits, `_` and `-`.
+
+**Keep CSV fields plain.** The parser breaks on quotes, apostrophes, backslashes
+and commas inside a field: an apostrophe in a password leaves the password
+empty, `Sean O'Brien` becomes `Sean`, and `"Smith, John"` shifts into the email
+column. Save the file with Unix line endings. With `--single`, the password is
+visible to other users in `ps` while the script runs.
+
+For each user, the script:
+
+- creates the account with `bash` as its shell, in the groups `users`,
+  `scratch-users` and `gpuqueue`
+- sets the password and forces a change at first login
+- stores the email address in the account's GECOS field, where gpuq and the
+  cleanup scripts look for it
+- creates `/home/<user>` (mode 750) with `projects/`, `data/`, `scripts/` and
+  `venvs/`, and `/scratch/users/<user>` (mode 750)
+- sets the disk quota to 90 GiB soft, 100 GiB hard
+- emails the user the username, the password and a link to this site
+
+Check the result:
 
 ```bash
-ls /scratch/users
+getent passwd <user>                           # the email appears in the 5th field
+id <user>                                      # groups
+ls -ld /home/<user> /scratch/users/<user>
+sudo quota -s -u <user>
 ```
-
-Where in both cases you should see new folder(s) having the same name of the user(s) just created.
 
 # Users Deletion
-In order to delete a user, use the provided [**delete_users.sh**](/scripts/bin/delete_users.sh) script.
-This script can be used in two distinct ways:
 
-1) For bulk users deletions, run the following:
-```bash
-delete_users.sh users.csv
-```
-where users.csv is a CSV file with columns named as follows:
-- username: the username of each user to be deleted
-
-Only the username column is read for deletion; any other columns (e.g. a leftover password or full_name from a creation CSV) are ignored.
-
-2) For single user deletion, run the following:
-```bash
-delete_users.sh --single username
-```
-where username is also here the username of the user to be deleted.
-
-Once run, the script will ask to confirm and, if so, press and enter "y" to confirm and "n" to cancel the operation.
-
-By default, the script will save a backup copy of the deleted users' files (home and scratch directories) under /var/backups/deleted_users. In order not to save such a backup, add the `--no-backup` argument.
-
-For the single user case, append `--no-backup` directly:
+Delete accounts with [**delete_users.sh**](/scripts/bin/delete_users.sh) (also
+`delete_users`), again as a sudoer:
 
 ```bash
-delete_users.sh --single username --no-backup
+delete_users.sh users.csv                  # or: delete_users.sh --csv users.csv
+delete_users.sh --single <user>
+delete_users.sh --single <user> --no-backup
+delete_users.sh users.csv --no-backup      # also: --csv users.csv --no-backup
 ```
 
-For the bulk case, `--no-backup` works whether you pass the CSV positionally or with the explicit `--csv` flag. Both of the following suppress the backup:
+Only the first CSV column (`username`) is read; the header line is skipped. The
+script asks once, `y` to go on. Then, for each user, it kills their processes,
+removes their quota, deletes `/scratch/users/<user>`, and removes the account
+and home directory.
 
-```bash
-delete_users.sh users.csv --no-backup
-```
+Unless you pass `--no-backup`, it first copies the home and scratch directories
+to `/var/backups/deleted_users/<user>_<timestamp>/`.
 
-```bash
-delete_users.sh --csv users.csv --no-backup
-```
+**Check the list before you confirm.** The script has no guard against system
+or admin accounts: it will delete any account named in the list, and one `y`
+covers the whole CSV. Also:
+
+- The backup lands on the root filesystem. Check the size first:
+  `sudo du -sh /scratch/users/<user>`.
+- A failed backup copy is logged as a warning, and the deletion still goes on.
+  Check the backup folder before you rely on it.
