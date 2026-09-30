@@ -131,6 +131,10 @@ reads `/scratch` or `/var/log`.
   about a file it is deleting in the same run.
 - Empty directories age out on the same clock as files; a user's top-level
   directory is never removed.
+- The reaper deletes inside `find` (`-delete`), never by passing a path to
+  `rm` later, so a user who swaps a directory for a symlink mid-run cannot
+  steer a root deletion elsewhere. Its unit can write only to the scratch
+  directories it cleans, `/var/log` and `/run`.
 - `--show-config` is the only source for the retention numbers.
 - Every `bin/` script is executable, parses, is in the manifest, and has a test.
 - Every script that sources the library uses the same loader block.

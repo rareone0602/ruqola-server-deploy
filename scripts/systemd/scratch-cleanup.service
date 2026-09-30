@@ -19,7 +19,10 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/scratch /var/log /run
+# Writable: only the scratch directories the reaper cleans (never /scratch itself
+# or /scratch/datasets), the logs and deletion record, and the lock. '-' lets the
+# unit start if one of them is missing; the script then warns and skips it.
+ReadWritePaths=-/scratch/shared -/scratch/temp -/scratch/users /var/log /run
 # msmtp writes a temporary file before sending. ProtectSystem=strict leaves /tmp
 # read-only, so without a private /tmp every warning and deletion mail failed.
 PrivateTmp=true

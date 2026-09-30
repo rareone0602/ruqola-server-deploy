@@ -1,0 +1,30 @@
+#!/bin/bash
+# Fake find: the real /usr/bin/find (deletion included), with two test-only
+# changes to its output on the way to the caller:
+#  - FAKE_OWNER (path<TAB>user): in FIND_RECORDs (lib/fs.sh: "owner size atime
+#    mtime" NUL path NUL), a mapped path's owner field reports that user. The
+#    tests are not root, so every file they create really belongs to them.
+#  - FAKE_FIND_HOOK_PATH / FAKE_FIND_HOOK: the first time that path comes out,
+#    run the hook command before passing the path on. That is the moment a
+#    user racing the reaper acts (todo E3). Output without -printf is taken to
+#    be -print0.
+records=0; [[ " $* " == *" -printf "* ]] && records=1
+owners=0;  [[ -n "${FAKE_OWNER:-}" && -s "$FAKE_OWNER" ]] && owners=1
+if [[ -z "${FAKE_FIND_HOOK_PATH:-}" ]] && (( !records || !owners )); then
+    exec /usr/bin/find "$@"
+fi
+hooked=0
+/usr/bin/find "$@" | while :; do
+    if (( records )); then IFS= read -r -d '' meta || break; fi
+    IFS= read -r -d '' path || break
+    if (( !hooked )) && [[ "$path" == "${FAKE_FIND_HOOK_PATH:-}" ]]; then
+        hooked=1; bash -c "$FAKE_FIND_HOOK"
+    fi
+    if (( !records )); then printf '%s\0' "$path"; continue; fi
+    if (( owners )); then
+        owner=$(awk -F'\t' -v p="$path" '$1 == p {print $2}' "$FAKE_OWNER")
+        [[ -n "$owner" ]] && meta="$owner ${meta#* }"
+    fi
+    printf '%s\0%s\0' "$meta" "$path"
+done
+exit "${PIPESTATUS[0]}"

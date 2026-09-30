@@ -4,8 +4,20 @@
 # format_bytes <n>  -> "1.5K", "206G", ...
 format_bytes() { numfmt --to=iec "$1" 2>/dev/null || echo "$1 bytes"; }
 
-# file_meta <path>  -> "owner size atime_epoch mtime_epoch" in one stat call
-file_meta() { stat -c '%U %s %X %Y' -- "$1" 2>/dev/null; }
+# find -printf format for one entry: "owner size atime mtime" NUL path NUL.
+# The metadata is find's own lstat of the entry it tests and acts on, never a
+# second lookup by path: a user can swap a directory for a symlink in between.
+# tests/stubs/find depends on this layout.
+FIND_RECORD='%u %s %A@ %T@\0%p\0'
+
+# read_record: read one FIND_RECORD from stdin into the caller's owner, size,
+# atime, mtime (whole epoch seconds) and path. Returns 1 at end of input.
+read_record() {
+    local meta
+    IFS= read -r -d '' meta && IFS= read -r -d '' path || return 1
+    read -r owner size atime mtime <<< "$meta"
+    atime=${atime%.*}; mtime=${mtime%.*}
+}
 
 # --- deletion manifest ------------------------------------------------------
 # One TSV per month, append-only, never rotated by automation. This is the

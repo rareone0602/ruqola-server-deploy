@@ -6,13 +6,18 @@ t "format_bytes"
 check "1536 -> 1.5K" "$(bash -c 'source "$0/init.sh"; format_bytes 1536' "$ROOT/lib")" "1.5K"
 check "0 -> 0"       "$(bash -c 'source "$0/init.sh"; format_bytes 0' "$ROOT/lib")" "0"
 
-t "file_meta: owner size atime mtime in one call"
+t "FIND_RECORD + read_record: owner size atime mtime path from find itself"
 new_sandbox
-mkfile users/alice/f.bin 200 100 alice
-read -r owner size atime mtime < <(with_stubs bash -c 'source "$0/init.sh"; file_meta "$1"' "$ROOT/lib" "$SB/scratch/users/alice/f.bin")
+mkfile "users/alice/two  spaces " 200 100 alice
+read -r owner size atime mtime path < <(with_stubs bash -c 'source "$0/init.sh"
+    read_record < <(find "$1" -type f -printf "$FIND_RECORD") && printf "%s %s %s %s %s\n" "$owner" "$size" "$atime" "$mtime" "$path"' \
+    "$ROOT/lib" "$SB/scratch/users")
 check "owner via stub" "$owner" "alice"
-check "size is the file size" "$size" "$(stat -c %s "$SB/scratch/users/alice/f.bin")"
-check "atime older than mtime as created" "$(( atime < mtime ))" "1"
+check "size is the file size" "$size" "$(stat -c %s "$SB/scratch/users/alice/two  spaces ")"
+check "atime and mtime are whole epoch seconds" "$atime $mtime" "$(stat -c '%X %Y' "$SB/scratch/users/alice/two  spaces ")"
+out=$(with_stubs bash -c 'source "$0/init.sh"
+    read_record < <(find "$1" -type f -printf "$FIND_RECORD") && printf "[%s]" "$path"' "$ROOT/lib" "$SB/scratch/users")
+check "a path with doubled and trailing spaces survives intact" "$out" "[$SB/scratch/users/alice/two  spaces ]"
 drop_sandbox
 
 t "manifest_record: header once, one TSV line per record, 7 columns"

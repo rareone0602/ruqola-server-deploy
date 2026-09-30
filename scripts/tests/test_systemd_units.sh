@@ -35,4 +35,13 @@ fi
 check "RequiresMountsFor= is in [Unit]" \
     "$(awk '/^\[/{sec=$0} /^RequiresMountsFor=/{print sec}' "$UNIT")" "[Unit]"
 
+t "The reaper can write only to the scratch directories it cleans (E3)"
+# Defence in depth behind deleting inside find: even a redirected deletion
+# cannot reach /scratch/datasets. The list must match the reaper's own.
+rw_scratch=$(unit_value ReadWritePaths | tr ' ' '\n' | sed 's/^-//' | grep '^/scratch' | sort | tr '\n' ' ')
+dirs=$(env -u SCRATCH_CLEANUP_DIRS bash "$ROOT/bin/scratch-cleanup.sh" --show-config | sed -n 's/^SCRATCH_DIRS=//p' | tr ' ' '\n' | sort | tr '\n' ' ')
+check "writable /scratch paths = the reaper's SCRATCH_DIRS" "$rw_scratch" "$dirs"
+check "neither /scratch nor /scratch/datasets is writable" "$(grep -cE '^/scratch(/datasets)?$' <<<"${rw_scratch// /$'\n'}")" "0"
+check "ProtectSystem=strict makes everything else read-only" "$(unit_value ProtectSystem)" "strict"
+
 finish
