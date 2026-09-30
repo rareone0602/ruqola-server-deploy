@@ -30,7 +30,7 @@ Values are the live settings on Mjölnir (`wsserver1`, GPUs `0`–`3`; see
 | `jobs.json` | queued submits, with `priority` and `hold_until` |
 | `usage.jsonl` | the [job ledger](#job-ledger) |
 | `untracked_state.json`, `rebind_state.json` | audit offenders: first seen, last email |
-| `gpuq.py` | shared copy of the script |
+| `gpuq.py` | retired shared copy; `retire_shared_copy.sh` removes it (see below) |
 | `kill.json`, `last_resource_notification.json`, `logs/` | leftovers of the retired daemon; unused |
 
 **Reaping.** Every `submit`, `status`, `kill` and `audit` first drops dead
@@ -49,7 +49,7 @@ run them from a gpuq checkout whose folder is named `gpuq`.
 
 ```bash
 sudo ./install_system.sh             # userspace.py -> /usr/local/bin/gpuq
-./install_user.sh --publish-shared   # userspace.py -> /var/lib/gpu_queue/gpuq.py, then link ~/.local/bin/gpuq to it
+./install_user.sh                    # link ~/.local/bin/gpuq -> /usr/local/bin/gpuq (optional)
 ```
 
 `install_system.sh [--source PATH]` re-runs itself under `sudo` if needed. It
@@ -60,26 +60,29 @@ refuses a source that does not compile, backs up the old binary to
 exists. `./install.sh --check` in `ruqola-server-deploy/scripts` then reports the
 backup as drift; `sudo ./install.sh` there retires it.
 
-`install_user.sh` needs no root. It installs `~/.local/bin/gpuq` and warns if
-`gpuq` on `PATH` resolves elsewhere.
+`/usr/local/bin/gpuq` is the only copy anyone should run, and `install_system.sh`
+is the only way to publish one. `install_user.sh` needs no root: it links
+`~/.local/bin/gpuq` to `/usr/local/bin/gpuq`, or with `--copy-from-repo` makes a
+private copy for testing. `--symlink-shared`, `--copy-shared` and
+`--publish-shared` are retired; they say so and make the link instead.
 
-| Flag | Effect |
-|---|---|
-| none, or `--symlink-shared` | symlink to `/var/lib/gpu_queue/gpuq.py` |
-| `--copy-shared` | private copy of `/var/lib/gpu_queue/gpuq.py` |
-| `--copy-from-repo` | private copy of the repo's `userspace.py` |
-| `--publish-shared` | first copy `userspace.py` to `/var/lib/gpu_queue/gpuq.py` (mode `0755`, so no member can edit it); combines with the others |
+**The shared copy is retired (E2).** Users used to run
+`/var/lib/gpu_queue/gpuq.py`, but that directory is writable by every
+`gpuqueue` member, so any of them could replace what everyone ran. Retire it once:
 
-**Upgrade every copy at once**, since all share the state files. Symlinks
-follow the shared copy; `--copy-*` installs do not. Check with
-`cmp /usr/local/bin/gpuq /var/lib/gpu_queue/gpuq.py`.
+```bash
+sudo ./retire_shared_copy.sh           # dry run: lists each user's ~/.local/bin/gpuq
+sudo ./retire_shared_copy.sh --apply   # re-point links to the shared copy, then remove it
+```
 
-**The deployed binary is older than the repo.** Only built-in defaults differ,
-and the live config overrides each of them. But its `gpuq config init` template
-has an 8 h over-quota hold and a 4 h kill grace. **Never run
-`gpuq config init --force` on the live host:** it replaces the config with that
-template, with no credentials, no quota and both detectors off. Redeploy from
-the repo to update the defaults.
+It changes each link as its owner, and keeps the link's path, so open shells
+keep working. Private copies and other links are listed, not touched. If any
+link cannot be changed, the shared copy stays.
+
+**The deployed binary matches the repo** (since 2026-09-30). **Never run
+`gpuq config init --force` on the live host:** it replaces the live config with
+the built-in template, which has no mail or Slack credentials, both audit
+detectors off, and a default `-t` of 24 h instead of the live 48 h.
 
 **Retired daemon.** Never deploy the repo's `gpu_queue.py`.
 `/etc/systemd/system/gpu-queue.service` still calls the removed `gpuq daemon`,

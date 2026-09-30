@@ -23,6 +23,7 @@ Design:
     gpuq; `gpuq audit --enforce` kills untracked jobs past their grace deadline.
 """
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -32,6 +33,7 @@ import shlex
 import signal
 import smtplib
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -91,17 +93,51 @@ SYSTEM_GPU_ACCOUNTS = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Opening files in the shared queue dir
+# ---------------------------------------------------------------------------
+# QUEUE_DIR is group-writable with no sticky bit (a sticky bit would break
+# _save's os.replace over other users' files), so any gpuqueue member can put a
+# symlink, FIFO or hard link where a state file should be. Root's audit opens
+# these files too. So every open here refuses to follow a symlink, never blocks
+# on a FIFO, and accepts only a plain file with one name; the mode is only ever
+# changed through that checked descriptor, and only on our own file.
+def _open_state(path: Path, flags: int) -> int:
+    """os.open for a queue-dir file; OSError unless it is a plain file."""
+    flags |= os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+    try:
+        fd = os.open(str(path), flags, 0o664)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise OSError(errno.ELOOP, "is a symlink; gpuq will not follow it",
+                          str(path)) from None
+        raise
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        os.close(fd)
+        raise OSError(errno.EPERM, "is not a plain file with one name; "
+                      "gpuq will not use it", str(path))
+    return fd
+
+
+def _make_group_rw(fd: int):
+    """Keep a shared file usable by every gpuqueue member (root creates 0644)."""
+    st = os.fstat(fd)
+    if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) != 0o664:
+        try:
+            os.fchmod(fd, 0o664)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Shared-file lock
 # ---------------------------------------------------------------------------
 @contextmanager
 def file_lock(path: Path):
     """Exclusive flock on `path`; creates the file group-rw if absent."""
-    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o664)
+    fd = _open_state(path, os.O_RDWR | os.O_CREAT)
     try:
-        try:
-            os.fchmod(fd, 0o664)
-        except OSError:
-            pass
+        _make_group_rw(fd)
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -117,10 +153,11 @@ def file_lock(path: Path):
 # ---------------------------------------------------------------------------
 def _load(path: Path):
     try:
-        if path.exists():
-            with open(path) as f:
-                return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+        with os.fdopen(_open_state(path, os.O_RDONLY)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         print(f"warning: could not parse {path}: {e}", file=sys.stderr)
     return []
 
@@ -497,12 +534,10 @@ def reap_queued(jobs):
 def append_usage(record):
     """Append one event line to USAGE_FILE. Caller holds the lock."""
     line = json.dumps(record, separators=(",", ":")) + "\n"
-    with open(USAGE_FILE, "a") as f:
+    fd = _open_state(USAGE_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    with os.fdopen(fd, "a") as f:
+        _make_group_rw(fd)
         f.write(line)
-    try:
-        os.chmod(USAGE_FILE, 0o664)
-    except OSError:
-        pass
 
 
 def _parse_iso(s):
@@ -520,7 +555,7 @@ def iter_usage_records():
     paths = sorted(QUEUE_DIR.glob("usage-*.jsonl")) + [USAGE_FILE]
     for path in paths:
         try:
-            with open(path) as f:
+            with os.fdopen(_open_state(path, os.O_RDONLY)) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -533,7 +568,7 @@ def iter_usage_records():
                         continue
                     rec.setdefault("event", "end")
                     yield rec
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
 
 

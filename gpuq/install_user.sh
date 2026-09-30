@@ -1,35 +1,34 @@
 #!/usr/bin/env bash
-# Install the userspace gpuq shadow into ~/.local/bin (no root required).
+# Put gpuq on your PATH as ~/.local/bin/gpuq (no root required).
 #
 # Usage:
-#   ./install_user.sh                       # symlink mode (default)
-#   ./install_user.sh --copy-shared         # per-user copy from shared master
-#   ./install_user.sh --copy-from-repo      # per-user copy from this repo
-#   ./install_user.sh --publish-shared      # (admin-ish) publish master to shared dir
+#   ./install_user.sh                    # link ~/.local/bin/gpuq -> /usr/local/bin/gpuq
+#   ./install_user.sh --copy-from-repo   # private copy of this repo's userspace.py (testing)
 #
-# Distribution paths:
-#   Repo source:    $REPO/gpuq/userspace.py
-#   Shared master:  /var/lib/gpu_queue/gpuq.py  (gpuqueue-writable)
-#   User target:    ~/.local/bin/gpuq
+# /usr/local/bin/gpuq is root-owned; install_system.sh is the only way to publish
+# a new version. The old shared copy, /var/lib/gpu_queue/gpuq.py, sat in a
+# directory every gpuqueue member can write to, so anyone could replace what
+# everyone ran (todo E2). It is retired: --symlink-shared, --copy-shared and
+# --publish-shared are still accepted, say so, and link to /usr/local/bin/gpuq.
+#
+# GPUQ_SYSTEM_BIN exists for the tests.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_REPO="$REPO_ROOT/gpuq/userspace.py"
-SCRIPT_SHARED="/var/lib/gpu_queue/gpuq.py"
+SYSTEM_BIN="${GPUQ_SYSTEM_BIN:-/usr/local/bin/gpuq}"
 TARGET="$HOME/.local/bin/gpuq"
 
-MODE="symlink-shared"
-PUBLISH_SHARED=0
-
+MODE="link-system"
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --symlink-shared) MODE="symlink-shared"; shift ;;
-        --copy-shared)    MODE="copy-shared"; shift ;;
         --copy-from-repo) MODE="copy-from-repo"; shift ;;
-        --publish-shared) PUBLISH_SHARED=1; shift ;;
+        --symlink-shared|--copy-shared|--publish-shared)
+            echo "$1 is retired: the shared copy is gone (todo E2). Linking to $SYSTEM_BIN instead." >&2
+            shift ;;
         --help|-h)
-            sed -n '2,15p' "${BASH_SOURCE[0]}"
+            sed -n '2,14p' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -38,42 +37,14 @@ done
 
 mkdir -p "$HOME/.local/bin"
 
-if [[ $PUBLISH_SHARED -eq 1 ]]; then
-    if [[ ! -r "$SCRIPT_REPO" ]]; then
-        echo "Cannot read repo source $SCRIPT_REPO" >&2
-        exit 1
-    fi
-    # Atomic publish: a user invoking the symlinked master mid-copy must never
-    # execute a truncated script. Group-writable so any gpuqueue member can
-    # republish later.
-    TMP="$(mktemp "${SCRIPT_SHARED}.XXXXXX")"
-    trap 'rm -f -- "$TMP"' EXIT
-    cp "$SCRIPT_REPO" "$TMP"
-    chmod 0775 "$TMP"
-    mv -f -- "$TMP" "$SCRIPT_SHARED"
-    trap - EXIT
-    echo "Published $SCRIPT_REPO -> $SCRIPT_SHARED"
-fi
-
 case "$MODE" in
-    symlink-shared)
-        if [[ ! -e "$SCRIPT_SHARED" ]]; then
-            echo "Master copy at $SCRIPT_SHARED does not exist." >&2
-            echo "Publish it first:  $0 --publish-shared" >&2
-            echo "(requires read access to the repo source)" >&2
+    link-system)
+        if [[ ! -x "$SYSTEM_BIN" ]]; then
+            echo "$SYSTEM_BIN is missing; an admin must run install_system.sh first." >&2
             exit 1
         fi
-        ln -snf "$SCRIPT_SHARED" "$TARGET"
-        echo "Linked $TARGET -> $SCRIPT_SHARED"
-        ;;
-    copy-shared)
-        if [[ ! -r "$SCRIPT_SHARED" ]]; then
-            echo "Cannot read $SCRIPT_SHARED" >&2
-            exit 1
-        fi
-        cp "$SCRIPT_SHARED" "$TARGET"
-        chmod +x "$TARGET"
-        echo "Copied $SCRIPT_SHARED -> $TARGET"
+        ln -snf "$SYSTEM_BIN" "$TARGET"
+        echo "Linked $TARGET -> $SYSTEM_BIN"
         ;;
     copy-from-repo)
         if [[ ! -r "$SCRIPT_REPO" ]]; then
@@ -86,14 +57,13 @@ case "$MODE" in
         ;;
 esac
 
-# Verify shadowing
+# Verify which gpuq the shell will run
 if command -v gpuq >/dev/null 2>&1; then
     RESOLVED="$(command -v gpuq)"
-    if [[ "$RESOLVED" == "$TARGET" ]]; then
+    if [[ "$RESOLVED" == "$TARGET" || "$RESOLVED" == "$SYSTEM_BIN" ]]; then
         echo "OK: 'gpuq' resolves to $RESOLVED"
     else
         echo "WARNING: 'gpuq' resolves to $RESOLVED (not $TARGET)" >&2
-        echo "Make sure ~/.local/bin precedes /usr/local/bin in PATH." >&2
     fi
 else
     echo "WARNING: 'gpuq' is not in PATH. Add ~/.local/bin to PATH." >&2
