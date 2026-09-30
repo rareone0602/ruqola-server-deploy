@@ -29,7 +29,7 @@ scripts/
 | `/usr/local/bin/scratch-cleanup.sh` | `bin/` | `scratch-cleanup.timer` | nightly, 02:00 + up to 30 min | root |
 | `/etc/systemd/system/scratch-cleanup.{service,timer}` | `systemd/` | systemd | | |
 | `/etc/logrotate.d/scratch-cleanup` | `logrotate.d/` | `logrotate.timer` | daily 00:00 | root |
-| `/usr/local/bin/check_quotas.sh` | `bin/` | an administrator, by hand | not scheduled | root via sudo |
+| `/usr/local/bin/check_quotas.sh` | `bin/` | root's crontab (not in MANIFEST, todo E5) | daily 02:00; mail delivery unconfirmed | root |
 | `/usr/local/bin/add_users.sh` (+ `create_users` link) | `bin/` | an administrator, by hand | | a sudoer, not root |
 | `/usr/local/bin/delete_users.sh` (+ `delete_users` link) | `bin/` | an administrator, by hand | | a sudoer, not root |
 | `/usr/local/bin/scratch-usage.sh`, `scratch-status` | `bin/` | anyone | | any user |

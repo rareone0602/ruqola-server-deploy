@@ -2,7 +2,7 @@
 
 This directory contains ready-to-use example scripts demonstrating best practices for deep learning on the Ruqola server's H200 GPUs.
 
-The server has **4 x NVIDIA H200 NVL GPUs** (indices `0,1,2,3`), each with **~141 GB of VRAM** (~564 GB total), Hopper architecture (compute capability 9.0). "Use all GPUs" means `0,1,2,3` (e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`, `gpuq submit -g 4`).
+The server has **4 x NVIDIA H200 NVL GPUs** (indices `0,1,2,3`), each with **~141 GB of VRAM** (~564 GB total), Hopper architecture (compute capability 9.0). "Use all GPUs" means `0,1,2,3` (e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`). Through gpuq, one user can hold at most 3 cards at a time, so the largest request is `gpuq submit -g 3`.
 
 ## 📁 Contents
 
@@ -27,7 +27,7 @@ The server has **4 x NVIDIA H200 NVL GPUs** (indices `0,1,2,3`), each with **~14
 
 ## 🚀 Quick Start
 
-> **How `gpuq submit` works:** gpuq is daemonless — `gpuq submit` runs your command in the **foreground** in the current terminal and streams its stdout/stderr straight to you. There are no per-job log files; if you want a log, redirect output yourself (see [Monitoring and Debugging](#-monitoring-and-debugging)). By default gpuq picks free GPUs and may **stack** additional jobs onto cards you already own; GPUs held by other users are off-limits until they free them. To pin exact GPUs use `--devices 1,3` — note this is **rejected immediately** if another user holds one of them, unless you add `--queue` to wait. The `--memory N` flag is a **placement floor**: it means "only put me on a GPU with at least N GB free" (not a cap or reservation). To be emailed when the job finishes, add `--notify you@example.com`. See [../docs/gpu-queue-guide.md](../docs/gpu-queue-guide.md) for the full ownership/stacking policy.
+> **How `gpuq submit` works:** gpuq is daemonless — `gpuq submit` runs your command in the **foreground** in the current terminal and streams its stdout/stderr straight to you. There are no per-job log files; if you want a log, redirect output yourself (see [Monitoring and Debugging](#-monitoring-and-debugging)). By default gpuq picks free GPUs and may **stack** additional jobs onto cards you already own; GPUs held by other users are off-limits until they free them. To pin exact GPUs use `--devices 1,3` — note this is **rejected immediately** if another user holds one of them, unless you add `--queue` to wait. The `--memory N` flag is a **placement floor**: it means "only put me on a GPU with at least N GB free" (not a cap or reservation). gpuq emails you when the job ends; `--notify you@example.com` only changes the address. See [../docs/gpu-queue-guide.md](../docs/gpu-queue-guide.md) for the full ownership/stacking policy.
 
 ### 1. PyTorch Training (Recommended for beginners)
 
