@@ -165,8 +165,11 @@ Such a process is **stopped, with no warning period** (`gpuqd/stopper.py`).
 If people see others skip the queue and get away with it, soon nobody queues.
 
 - **When:** on its second sighting, at least 60 s after the first. Passes run
-  every 30 s, so that is 60 to 90 s after it first shows up. One sighting is
-  never enough, so a single bad `nvidia-smi` sample cannot cost anyone work.
+  every 30 s, so gpuqd first sees a process within 30 s of it taking a GPU, and
+  stops it 60 to 90 s after that: within 2 minutes in all. One sighting is never
+  enough, so a single bad `nvidia-smi` sample cannot cost anyone work. Live
+  test, 2026-10-01: a PyTorch process outside gpuq was stopped 92 s after it
+  took a GPU.
 - **How:** gpuqd pins the process with a pidfd and checks that it is still the
   process it saw (same kernel start time, same owner, uid 1000 or above). Then
   SIGTERM, and SIGKILL 10 s later if it is still there. Only that process is
