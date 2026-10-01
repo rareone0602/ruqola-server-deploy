@@ -13,6 +13,14 @@ CONNECT_FOR_S = float(os.environ.get("GPUQ_CONNECT_FOR_S", 15))   # tests shorte
 STATE_DIR = os.environ.get("GPUQD_STATE_DIR", "/var/lib/gpuq")
 
 
+def printable(text):
+    """`text` safe to show on someone else's terminal (todo E9). A job's name and
+    command are typed by its owner, and an escape sequence, a carriage return or a
+    right-to-left override in them could hide or forge a line of `gpuq status`. So
+    line breaks and tabs become a space, any other control character a `?`."""
+    return "".join(c if c.isprintable() else " " if c.isspace() else "?" for c in str(text))
+
+
 class Die(SystemExit):
     pass
 

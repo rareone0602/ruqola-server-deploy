@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .common import STATE_DIR
+from .common import STATE_DIR, printable
 
 
 def records(state_dir=STATE_DIR):
@@ -66,7 +66,7 @@ def _when(iso):
 
 
 def _trunc(text, width):
-    text = (text or "").replace("\n", " ")
+    text = text or ""
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
@@ -92,25 +92,29 @@ def cmd_history(args):
     print(f"{'JOB':<11} " + (f"{'USER':<10} " if args.all else "")
           + f"{'ENDED':<12} {'WAIT':>7} {'RUNTIME':>9} {'GPUS':<5} "
             f"{'GPU-H':>7} {'EXIT':>4} {'RESULT':<10} NAME/COMMAND")
+    # Each row is made printable whole (todo E9): the ledger lines copied at cutover
+    # came from a file every member could write, so any field may hold anything.
     for r in recs:
         name = r.get("name") or ""
-        command = (r.get("command") or "").replace("\n", " ")
+        command = r.get("command") or ""
         label = f"{name}: {command}" if name else (command or "-")
         user = f"{(r.get('user') or '?'):<10} " if args.all else ""
         if r.get("event") != "end":
             want = r.get("gpus_requested")
-            print(f"{str(r.get('id') or '-'):<11} {user}{_when(r.get('at')):<12} "
-                  f"{_secs(r.get('wait_sec')):>7} {'-':>9} {('?' if want is None else want):<5} "
-                  f"{'-':>7} {'-':>4} {r['event'] + ' (' + str(r.get('reason', '?')) + ')':<10} "
-                  f"{_trunc(label, 48)}")
+            print(printable(
+                f"{str(r.get('id') or '-'):<11} {user}{_when(r.get('at')):<12} "
+                f"{_secs(r.get('wait_sec')):>7} {'-':>9} {('?' if want is None else want):<5} "
+                f"{'-':>7} {'-':>4} {r['event'] + ' (' + str(r.get('reason', '?')) + ')':<10} "
+                f"{_trunc(label, 48)}"))
             continue
         gpus = ",".join(map(str, r.get("gpus") or [])) or "-"
         code = r.get("exit_code")
         result = (r.get("end_reason") or "-") + ("*" if r.get("synthetic") else "")
-        print(f"{str(r.get('id') or '-'):<11} {user}{_when(r.get('ended_at')):<12} "
-              f"{_secs(r.get('queue_wait_sec')):>7} {_hours(r.get('elapsed_hours')):>9} "
-              f"{gpus:<5} {_float(r.get('gpu_hours')):>7.2f} {('-' if code is None else code):>4} "
-              f"{result:<10} {_trunc(label, 48)}")
+        print(printable(
+            f"{str(r.get('id') or '-'):<11} {user}{_when(r.get('ended_at')):<12} "
+            f"{_secs(r.get('queue_wait_sec')):>7} {_hours(r.get('elapsed_hours')):>9} "
+            f"{gpus:<5} {_float(r.get('gpu_hours')):>7.2f} {('-' if code is None else code):>4} "
+            f"{result:<10} {_trunc(label, 48)}"))
     if any(r.get("synthetic") for r in recs):
         print("(*synthetic record: the job ended without normal accounting; "
               "charged up to when it was found gone)")

@@ -2,7 +2,7 @@
 import time
 from datetime import datetime
 
-from .common import ask
+from .common import ask, printable
 
 
 def when(t, now=None):
@@ -24,7 +24,7 @@ def _run_for(seconds):
 
 
 def _trunc(text, width):
-    text = (text or "").replace("\n", " ")
+    text = printable(text or "")
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
@@ -62,7 +62,7 @@ def cmd_status(args):
             what = "cannot run on this host as asked"
         else:
             what = "waiting"
-        label = f"  {q['name']}" if q.get("name") else ""
+        label = f"  {printable(q['name'])}" if q.get("name") else ""
         print(f"  {n}. {q['user']:<10} {q['job']:<11} {q['gpus']} GPU  {what:<34} "
               f"used lately: {q['used']:.1f} card-h{label}")
     for jid in s.get("waiting_for_client") or ():
@@ -74,7 +74,7 @@ def cmd_status(args):
         print(f"\njoining their own card, not in line: each starts once its card has room "
               f"({len(s['joining'])})")
         for j in s["joining"]:
-            label = f"  {j['name']}" if j.get("name") else ""
+            label = f"  {printable(j['name'])}" if j.get("name") else ""
             until = f"  must end by {when(j['until'], now)}" if j.get("until") else ""
             print(f"  {j['user']:<10} {j['job']:<11} GPU {','.join(map(str, j['cards'])):<6} "
                   f"needs {j['need_gb']:g} GB, {j['free_gb']:.0f} GB free{until}{label}")
