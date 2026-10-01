@@ -11,14 +11,16 @@ change that address, ask the admin.
 | `[gpuq] job <id> started on GPU(s) <n>` | Your job started after waiting 10 minutes or more. Jobs that start sooner get no email. | Nothing. |
 | `[gpuq] job <id>: 1 hour left` | The job is stopped in 1 hour, at its 48-hour limit. A `--devices` job stops when your job(s) on that GPU reach theirs. | Save a checkpoint now. Resubmit later to resume. |
 | `[gpuq] job <id> completed` | A job submitted with `--notify` ended. The last word is the result: `completed`, `failed`, `timed_out`, `killed` or `lost`. | Nothing, or run `gpuq history`. |
+| `[gpuq] stopped your GPU process on wsserver1` | A process of yours used a GPU outside gpuq, so gpuq stopped it: SIGTERM, then SIGKILL 10 s later. The email lists the process and the GPU. | Run it through gpuq: the email shows the `gpuq submit` command, or use `gpuq shell` for interactive work. |
 | `[gpuq] job <id> cancelled` | A `--detach` job with `--devices N` was waiting for room on your GPU N, but your job(s) there ended first. | Submit it again without `--devices`. |
 
 **Job-end email.** Sent only for a job submitted with `gpuq submit --notify`.
 It lists the host, command, GPUs, start and end time, result and exit code.
 
-**GPU work outside gpuq.** Start all GPU work through gpuq. gpuq records GPU
-use outside it, and will stop it automatically in a later step. It sends no
-email about it.
+**GPU work outside gpuq.** Start all GPU work through gpuq. A process using a
+GPU outside gpuq is stopped about a minute after gpuq first sees it, with no
+warning first. You get at most one of these emails an hour; if you keep
+restarting the process, each stop still happens.
 
 ## Scratch cleanup emails
 

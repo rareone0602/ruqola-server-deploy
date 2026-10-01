@@ -24,7 +24,7 @@ Host `wsserver1`: 4× H200 NVL (compute capability 9.0), 256 logical CPUs,
 
 | Rule | Setting |
 |---|---|
-| Starting GPU work | Only through gpuq (`gpuq submit`, or `gpuq shell` for interactive work). gpuq records GPU use outside it, and will stop it automatically in a later step. |
+| Starting GPU work | Only through gpuq (`gpuq submit`, or `gpuq shell` for interactive work). GPU use outside gpuq is stopped about a minute after gpuq first sees it (SIGTERM, then SIGKILL 10 s later), and you get an email. |
 | Job time | 48 hours for every job. Longer work must checkpoint and resubmit. |
 | Who goes first | When more people want GPUs than there are, whoever has used the fewest GPU-hours lately. Use fades by half every 7 days. |
 | Your GPU | A GPU your job runs on is yours: nobody else's job is put on it. A job may ask for up to all 4. |

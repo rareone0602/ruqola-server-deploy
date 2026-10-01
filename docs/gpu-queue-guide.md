@@ -44,7 +44,7 @@ gpuq submit -h       # every submit option
 | Who goes first | When more people want GPUs than there are, whoever has used the fewest GPU-hours lately goes first. Use fades by half every 7 days. |
 | Jobs needing 2+ GPUs | get a promised start time, and the first GPUs to free up are held for them. A promise only moves earlier. |
 | Your GPU is yours | While your job runs on a GPU, nobody else's job is put on it. You may add more of your own jobs ([Sharing your own GPU](#sharing-your-own-gpu)). |
-| GPU work outside gpuq | Not allowed. gpuq records it, and will stop it automatically in a later step. |
+| GPU work outside gpuq | Not allowed. About a minute after gpuq first sees it, the process gets SIGTERM, then SIGKILL 10 s later, and you get an email. |
 
 - There is no weekly quota and no limit on GPUs per person. Fair-share keeps it
   fair: the more you have used lately, the later your turn when others wait.
@@ -52,7 +52,9 @@ gpuq submit -h       # every submit option
   your jobs share it.
 - "All GPU work" means everything: a notebook kernel, a quick `python3 -c`
   test, an IDE session. Use `gpuq shell` for interactive work
-  ([Background jobs and shells](#background-jobs-and-shells)).
+  ([Background jobs and shells](#background-jobs-and-shells)). Anything else on
+  a GPU is stopped, with no warning first: that is what keeps the queue fair
+  for the people who use it.
 - A job can only reach its own GPUs. The other GPUs do not exist for it.
 
 ## Submitting a job
@@ -196,7 +198,9 @@ When the job ends, gpuq prints one line such as
 
 - when a job that waited 10 minutes or more starts;
 - 1 hour before a job's 48-hour stop;
-- when a job ends, only if you passed `--notify`.
+- when a job ends, only if you passed `--notify`;
+- when gpuq stops a GPU process of yours that ran outside gpuq, with the
+  `gpuq submit` command that runs it properly (at most one an hour).
 
 **Stopping jobs.** `gpuq kill <id> [<id> ...]` stops your running jobs (SIGTERM,
 then SIGKILL 10 s later) or cancels waiting ones, from any terminal.
@@ -257,6 +261,7 @@ gpuq kill --mine     # stops the whole sweep, running and waiting
 | `gpuq: this host has 4 GPU(s); you asked for 5.` | Ask for 4 or fewer. |
 | `gpuq: -m 200: the largest card here has 140 GB.` | Ask for what fits on one GPU. |
 | ``gpuq: gpuq shell needs a terminal; use `gpuq submit` for scripts.`` | Run `gpuq shell` from an interactive terminal (tmux is fine). |
+| Email `[gpuq] stopped your GPU process on wsserver1` | A process of yours used a GPU outside gpuq, so it was stopped. Run it with `gpuq submit` (or `gpuq shell` for interactive work); the email shows the command. |
 | `gpuq: cannot reach gpuqd at /run/gpuq/gpuqd.sock ...` | The queue service is down. Tell the admin. |
 | Job ended with RESULT `timed_out`, exit 143 | It hit 48 h. Save checkpoints and resubmit. |
 | CUDA finds no GPU, or "invalid device ordinal" | The job set `CUDA_VISIBLE_DEVICES`, or used `cuda:N` beyond what `-g` gave it. Use `cuda:0` … `cuda:<g-1>`. |

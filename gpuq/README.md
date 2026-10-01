@@ -45,7 +45,7 @@ repo. This version (v3) has been live since 2026-10-01 20:33.
 | `/usr/local/lib/gpuq-v2/gpuq` | the previous client, for `--rollback` (removed by `--retire`) |
 
 **Logs:** `journalctl -u gpuqd` has every submit, start, end and cancel, and
-each GPU process seen outside gpuq. It needs `sudo` or the `systemd-journal`
+every GPU process stopped outside gpuq. It needs `sudo` or the `systemd-journal`
 group.
 
 **Stopping another user's job:** `sudo gpuq kill <id>`. Root may kill any job.
@@ -161,12 +161,25 @@ job's processes are exactly its unit's cgroup
 (`/gpuq.slice/gpuq-job-<id>.service`), so gpuqd knows for sure which GPU
 processes are not part of any job. Accounts below uid 1000 are skipped.
 
-- **Now:** each pass, gpuqd logs such a process on its second sighting, at
-  least 60 s after the first: `rule 4 would stop pid ...` in the journal. A GPU
-  held outside gpuq is never given out, and `gpuq status` lists it under "GPU use
-  outside gpuq".
-- **Later:** stopping these processes is the next step of the rollout
-  (docs/v3-design.md §10, step 4). It is not built yet.
+Such a process is **stopped, with no warning period** (`gpuqd/stopper.py`).
+If people see others skip the queue and get away with it, soon nobody queues.
+
+- **When:** on its second sighting, at least 60 s after the first. Passes run
+  every 30 s, so that is 60 to 90 s after it first shows up. One sighting is
+  never enough, so a single bad `nvidia-smi` sample cannot cost anyone work.
+- **How:** gpuqd pins the process with a pidfd and checks that it is still the
+  process it saw (same kernel start time, same owner, uid 1000 or above). Then
+  SIGTERM, and SIGKILL 10 s later if it is still there. Only that process is
+  signalled, never its parent or its group, and a recycled pid is never hit.
+- **Its owner gets an email** listing what was stopped and the `gpuq submit`
+  command that runs it properly. At most one an hour per person; every stop is
+  in the journal (`rule 4: stopped pid ...`, then `... SIGKILL` if needed).
+- Until it is gone, a GPU held outside gpuq is never given out, and
+  `gpuq status` lists it under "GPU use outside gpuq".
+- **Emergency off switch:** `sudo touch /etc/gpuq/report-only`. From the next
+  pass, such processes are only logged (`rule 4 would stop pid ...`); no restart
+  needed. `sudo rm /etc/gpuq/report-only` switches stopping back on.
+  `gpuq config` shows which is in force.
 
 `gpuq audit` is accepted and does nothing, so old cron lines stay quiet.
 
@@ -181,6 +194,7 @@ server never stalls the queue.
 | `[gpuq] job <id>: 1 hour left` | 1 hour before the job's deadline |
 | `[gpuq] job <id> <end_reason>` | the job ended, only if submitted with `--notify` |
 | `[gpuq] job <id> cancelled` | a detached `--devices` job whose GPU's jobs all ended first |
+| `[gpuq] stopped your GPU process on <host>` | a process of the user's that used a GPU outside gpuq was stopped (at most one an hour per person) |
 
 - **Sending:** SMTP with STARTTLS. The sender is `username` in
   `/etc/gpuq/mail.json`, `mjolnirruqola@gmail.com`, with a Gmail app password.
