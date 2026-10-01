@@ -125,6 +125,30 @@ names physical GPU 0, which may not be yours. A job on a card it was not given
 is a rebind and is killed (see [Rules](#rules)). To choose a card, use
 `--devices`.
 
+### Changing with gpuq v3: `--devices`
+
+gpuq is being rebuilt as v3. It is not live yet, and the switch will be
+announced. Until then, `--devices` works as described above. From the switch:
+
+- `--devices N` adds a job to **your own** card N: a GPU that one of your gpuq
+  jobs is running on. Use it for what you run beside your training: a quick
+  test of an idea, an evaluation, a debugger.
+- That job skips the queue. It starts once card N has the `-m` GB free, and
+  never with less than 2 GB free. The card is charged once, however many of
+  your jobs share it.
+- It must end when your job(s) on card N reach their 48 hours. If they end
+  before there is room for it, it is cancelled.
+- `--devices` on any other card is refused. For new cards, use `-g N`: all 4
+  cards are identical, so gpuq picks which.
+
+```bash
+gpuq submit --devices 2 -m 10 -- python test_idea.py   # beside your job on GPU 2
+gpuq shell --devices 2                                 # a shell on your GPU 2 (v3)
+```
+
+**To be ready:** if a script uses `--devices` to pick a free card, change it to
+`-g`.
+
 ## Keeping Jobs Alive After Logout
 
 A job lives only as long as the `gpuq submit` that started it. If the terminal
