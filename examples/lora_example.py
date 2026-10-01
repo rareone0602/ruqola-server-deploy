@@ -4,7 +4,7 @@ LoRA (Low-Rank Adaptation) Fine-tuning Example for H200 GPUs
 Demonstrates parameter-efficient fine-tuning of large language models.
 
 Usage:
-gpuq submit --command "python lora_example.py --model meta-llama/Llama-2-7b-hf --dataset alpaca" --gpus 1 --memory 50 --time 8
+gpuq submit --command "python lora_example.py --model meta-llama/Llama-2-7b-hf --dataset alpaca" --gpus 1
 
 Features:
 - Parameter-efficient fine-tuning with LoRA

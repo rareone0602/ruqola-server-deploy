@@ -160,10 +160,11 @@ killall python                 # kill all python processes
 
 ### Screen and Tmux (Session Management)
 
-Because `gpuq submit` runs your job in the **foreground** of the terminal you
-launched it from (there is no background daemon), a terminal multiplexer like
-`screen` or `tmux` is the recommended way to keep a long job alive after you
-disconnect. Start the job inside a session, detach, and reattach later.
+`gpuq submit` runs your job **attached** to the terminal you launched it from,
+so closing that terminal stops the job. A terminal multiplexer like `screen` or
+`tmux` is the recommended way to keep a long job alive after you disconnect.
+Start the job inside a session, detach, and reattach later. (`gpuq submit
+--detach` is the other way: the job keeps running after you log out.)
 
 ```bash
 # Screen
@@ -197,7 +198,7 @@ export MY_VAR="value"           # set environment variable
 export PATH=$PATH:/new/path     # add to PATH
 
 # Persistent variables (add to ~/.bashrc or ~/.bash_profile)
-echo 'export CUDA_VISIBLE_DEVICES=0' >> ~/.bashrc
+echo 'export HF_HOME=/scratch/users/$USER/hf' >> ~/.bashrc
 source ~/.bashrc                # reload configuration
 ```
 
@@ -209,11 +210,12 @@ echo $HOME                      # /home/username
 echo $PWD                       # current directory
 echo $OLDPWD                    # previous directory
 
-echo $CUDA_VISIBLE_DEVICES       # inside a gpuq job: the GPUs gpuq gave you
+echo $CUDA_VISIBLE_DEVICES       # inside a gpuq job: 0 (0,1 for 2 GPUs); cuda:0 is your first GPU
+echo $GPUQ_GPUS                  # inside a gpuq job: the GPU numbers nvidia-smi shows
 ```
 
-> Do not set `CUDA_VISIBLE_DEVICES` yourself. `gpuq submit` sets it for each job
-> to the GPUs it gave you; overriding it gets the job killed (see the
+> Do not set `CUDA_VISIBLE_DEVICES` yourself. gpuq sets it for each job, and a
+> job can reach only the GPUs gpuq gave it: other numbers find no GPU (see the
 > [GPU Queue Guide](gpu-queue-guide.md)).
 
 ## SSH and Remote Access
@@ -301,20 +303,24 @@ nvidia-smi -q                   # detailed GPU info
 
 # Our custom queue system (gpuq)
 gpuq status                     # check queue and GPU ownership
-gpuq submit -m 40 -t 8 -- python train.py  # 1 GPU with >= 40 GB free, 8 h limit
-gpuq submit -g 2 -m 40 -- python train.py  # 2 GPUs
-gpuq submit -m 40 --command "python train.py"   # the same, as one string
+gpuq submit -- python train.py  # 1 GPU to yourself
+gpuq submit -g 2 -- python train.py  # 2 GPUs
+gpuq submit --command "python train.py"   # 1 GPU, the command as one string
+gpuq submit --detach -- python train.py   # return at once; output to ~/gpuq-logs/<id>.log
+gpuq shell                      # an interactive shell on a GPU
+gpuq why 12345                  # why a job waits, and when it should start
 gpuq history                    # your recent jobs (runtime, exit code, end reason)
-gpuq quota                      # your rolling 7-day GPU-hours vs budget
+gpuq share                      # your recent GPU-hours and your place in line
 gpuq kill 12345                 # stop a running job or cancel a queued one (ids can be listed)
 gpuq kill --mine                # stop all your running jobs, cancel all your queued ones
 ```
 
-Your job runs in the **foreground** of the terminal — gpuq has no daemon and
-writes no per-job log files, so its output goes straight to your screen. Redirect
-it yourself if you want a log (`gpuq submit -m 40 -- python train.py > train.log 2>&1`),
-and run inside `screen`/`tmux` for long jobs. See the
-[GPU Queue Guide](gpu-queue-guide.md) for full details.
+By default your job runs **attached** to your terminal, so its output goes
+straight to your screen. Redirect it yourself if you want a log
+(`gpuq submit -- python train.py > train.log 2>&1`), and run inside
+`screen`/`tmux` for long jobs. With `--detach`, the job keeps running after you
+log out, and its output goes to `~/gpuq-logs/<id>.log`. See the
+[GPU Queue Guide](gpu-queue-guide.md#background-jobs-and-shells) for full details.
 
 ### System Information
 
@@ -362,12 +368,13 @@ deactivate                      # leave the venv
 
 1. **Check status first**: `gpuq status` before submitting jobs
 2. **Specify resource requirements**: Don't request more GPUs than you need
-3. **You own the GPUs gpuq allocates to you**: you can stack additional jobs onto
-   cards you already hold, but cards held by other users are off-limits until they
-   free them. There is also a rolling weekly (7-day) GPU-hour quota (check yours
-   with `gpuq quota`) — see the [GPU Queue Guide](gpu-queue-guide.md).
-4. **Keep long jobs in `screen`/`tmux`**: gpuq jobs run in the foreground, so a
-   multiplexer keeps them alive if you disconnect.
+3. **A GPU your job runs on is yours**: nobody else's job is put on it, and you
+   can add more of your own jobs to it (`gpuq submit --devices N`). When GPUs are
+   short, whoever has used the fewest GPU-hours lately goes first (check yours
+   with `gpuq share`) — see the [GPU Queue Guide](gpu-queue-guide.md#rules).
+4. **Keep long jobs in `screen`/`tmux`**: gpuq jobs run attached to your
+   terminal, so a multiplexer keeps them alive if you disconnect. Or use
+   `gpuq submit --detach`.
 5. **Clean up abandoned jobs**: `gpuq kill --mine` stops all your running jobs
    and cancels all your queued ones.
 
@@ -381,7 +388,7 @@ cd directory                    # go somewhere
 cp file.txt backup.txt          # make a copy
 nvidia-smi                      # check GPUs (4x H200)
 gpuq status                     # check queue
-gpuq submit -m 40 -- python train.py  # run a job on 1 GPU
+gpuq submit -- python train.py  # run a job on 1 GPU
 top                             # what's running?
 kill PID                        # stop a process
 ```

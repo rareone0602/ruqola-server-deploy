@@ -4,7 +4,7 @@ Hugging Face Transformers Inference Example for H200 GPUs
 Optimized for high-throughput inference and interactive generation.
 
 Usage:
-gpuq submit --command "python transformers_inference.py --model microsoft/DialoGPT-medium --input prompts.txt" --gpus 1 --memory 40 --time 4
+gpuq submit --command "python transformers_inference.py --model microsoft/DialoGPT-medium --input prompts.txt" --gpus 1
 
 Features:
 - Optimized batch inference for high throughput

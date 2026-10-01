@@ -41,7 +41,7 @@ export HF_HOME="/scratch/users/$USER/hf"   # HF cache (models + datasets); keeps
 export TOKENIZERS_PARALLELISM=false  # Avoid multiprocessing issues
 ```
 
-> Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs it gave you. Overriding it runs the job on a card it was not given, and the audit kills it (see the [GPU Queue guide](gpu-queue-guide.md)).
+> Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs it gave you. A job can reach only its own GPUs, so any other number finds no GPU (see the [GPU Queue guide](gpu-queue-guide.md)).
 >
 > `HF_HOME` is the current cache location for both models and datasets. The older `TRANSFORMERS_CACHE` variable is deprecated and ignored in recent transformers releases.
 
@@ -584,7 +584,7 @@ def train_with_accelerate(model_name, dataset, config):
     )
 ```
 
-> For data-parallel runs (one full model replica per GPU), launch with `torchrun --nproc_per_node=N train.py` where `N` matches your gpuq allocation (at most 3 cards per user on this host).
+> For data-parallel runs (one full model replica per GPU), launch with `torchrun --nproc_per_node=N train.py` where `N` matches your gpuq allocation (`-g N`, up to 4 on this host).
 
 ### Multi-GPU Inference
 

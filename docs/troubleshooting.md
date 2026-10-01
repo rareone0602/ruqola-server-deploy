@@ -8,7 +8,8 @@ gpuq status      # who holds which GPU, what is queued, every GPU process
 ```
 
 For messages printed by `gpuq submit`, see the table in the
-[GPU Queue guide](gpu-queue-guide.md#troubleshooting).
+[GPU Queue guide](gpu-queue-guide.md#troubleshooting). If a job is waiting,
+`gpuq why <id>` says why and when it should start.
 
 ## My job ended unexpectedly
 
@@ -16,17 +17,16 @@ Find the job in `gpuq history` and read its RESULT:
 
 | RESULT | What happened | Fix |
 |---|---|---|
-| `timed_out` | It hit its `-t` limit. | Resubmit with a larger `-t` (at most 48). Save checkpoints so long runs can resume. |
-| `killed` | A signal ended it: `gpuq kill`, Ctrl-C, a closed terminal or dropped SSH session, or the kernel running out of RAM. | Run jobs inside `tmux` or `screen`. If none of these fits, ask the admin to check the kernel log. |
-| `failed` | Your program exited with an error. | Read the output you saved. Look for a Python traceback or `CUDA out of memory`. |
-| `lost*` | The `gpuq submit` process itself died. | Run inside `tmux`; resubmit. |
+| `timed_out` | It reached 48 hours, the limit for every job. You got an email 1 hour before. | Save checkpoints and resubmit, so the run resumes. |
+| `killed` | A signal ended it: `gpuq kill`, Ctrl-C, a closed terminal or dropped SSH session, or the kernel running out of RAM. | Run jobs inside `tmux` or `screen`, or use `gpuq submit --detach`. If none of these fits, ask the admin to check the kernel log. |
+| `failed` | Your program exited with an error. | Read the output you saved (for a `--detach` job, `~/gpuq-logs/<id>.log`). Look for a Python traceback or `CUDA out of memory`. |
+| `lost*` | gpuq lost track of the job. This is rare. | Resubmit. If it happens again, contact the admin. |
 
-If you got a `... was KILLED` email, the audit killed a GPU process that gpuq
-did not start, or a job running on a card it was not given. See
-[Notifications](notifications-faq.md).
+The emails gpuq sends are explained in [Notifications](notifications-faq.md).
 
-gpuq keeps no copy of your job's output. Save it next time:
-`gpuq submit -m 40 -- python train.py 2>&1 | tee run.log`.
+For an attached job, gpuq keeps no copy of its output. Save it next time:
+`gpuq submit -- python train.py 2>&1 | tee run.log`, or use `--detach`, which
+writes the output to `~/gpuq-logs/<id>.log`.
 
 ## Python and packages
 

@@ -2,7 +2,7 @@
 
 This directory contains ready-to-use example scripts demonstrating best practices for deep learning on the Ruqola server's H200 GPUs.
 
-The server has **4 x NVIDIA H200 NVL GPUs** (indices `0,1,2,3`), each with **~141 GB of VRAM** (~564 GB total), Hopper architecture (compute capability 9.0). "Use all GPUs" means `0,1,2,3` (e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3`, `torchrun --nproc_per_node=4`). Through gpuq, one user can hold at most 3 cards at a time, so the largest request is `gpuq submit -g 3`.
+The server has **4 x NVIDIA H200 NVL GPUs** (indices `0,1,2,3`), each with **~141 GB of VRAM** (~564 GB total), Hopper architecture (compute capability 9.0). "Use all GPUs" means `0,1,2,3`: ask gpuq for all four with `gpuq submit -g 4` and launch `torchrun --nproc_per_node=4`. gpuq sets `CUDA_VISIBLE_DEVICES` for you; do not set it yourself.
 
 ## 📁 Contents
 
@@ -27,7 +27,7 @@ The server has **4 x NVIDIA H200 NVL GPUs** (indices `0,1,2,3`), each with **~14
 
 ## 🚀 Quick Start
 
-> **How `gpuq submit` works:** gpuq is daemonless — `gpuq submit` runs your command in the **foreground** in the current terminal and streams its stdout/stderr straight to you. There are no per-job log files; if you want a log, redirect output yourself (see [Monitoring and Debugging](#-monitoring-and-debugging)). By default gpuq picks free GPUs and may **stack** additional jobs onto cards you already own; GPUs held by other users are off-limits until they free them. To pin exact GPUs use `--devices 1,3` — note this is **rejected immediately** if another user holds one of them, unless you add `--queue` to wait. The `--memory N` flag is a **placement floor**: it means "only put me on a GPU with at least N GB free" (not a cap or reservation). gpuq emails you when the job ends; `--notify you@example.com` only changes the address. See [../docs/gpu-queue-guide.md](../docs/gpu-queue-guide.md) for the full ownership/stacking policy.
+> **How `gpuq submit` works:** `gpuq submit` waits its turn, then runs your command in the current terminal and streams its stdout/stderr straight to you. Closing the terminal stops the job, so run it inside tmux, or add `--detach`: gpuq returns at once and the output goes to `~/gpuq-logs/<id>.log` (see [Monitoring and Debugging](#-monitoring-and-debugging)). By default each job gets GPUs to itself. A GPU your job runs on is yours: nobody else's job is put on it. The `--memory N` flag means "beside my own running job if N GB is free there, else a free GPU": use it for small tests and evaluations, and leave it out for training. Every job may run 48 h; save checkpoints and resubmit for longer work. gpuq emails you when the job ends only if you add `--notify`. See [../docs/gpu-queue-guide.md](../docs/gpu-queue-guide.md#rules) for the full rules.
 
 ### 1. PyTorch Training (Recommended for beginners)
 
@@ -37,13 +37,9 @@ cp examples/pytorch_training.py .
 cp examples/resnet_config.yaml .
 
 # Submit training job.
-# --memory is a placement floor (min free VRAM on the chosen GPU), not a budget.
-# The CIFAR-10 ResNet example only needs a few GB, so a small floor is fine.
 gpuq submit \
     --command "python pytorch_training.py --config resnet_config.yaml" \
-    --gpus 1 \
-    --memory 8 \
-    --time 8
+    --gpus 1
 ```
 
 ### 2. TensorFlow Training
@@ -56,9 +52,7 @@ cp examples/tf_config.json .
 # Submit job
 gpuq submit \
     --command "python tensorflow_training.py --config tf_config.json" \
-    --gpus 1 \
-    --memory 12 \
-    --time 8
+    --gpus 1
 ```
 
 ### 3. JAX/Flax Training
@@ -71,9 +65,7 @@ cp examples/jax_config.py .
 # Submit job
 gpuq submit \
     --command "python jax_training.py --config jax_config.py" \
-    --gpus 1 \
-    --memory 10 \
-    --time 6
+    --gpus 1
 ```
 
 ### 4. Transformers Fine-tuning (LLMs)
@@ -84,12 +76,10 @@ cp examples/transformers_finetuning.py .
 cp examples/transformers_config.yaml .
 
 # Submit job for large model fine-tuning.
-# --gpus 4 uses all four H200s; set the --memory floor to the per-card peak you expect.
+# --gpus 4 uses all four H200s.
 gpuq submit \
     --command "torchrun --nproc_per_node=4 transformers_finetuning.py --config transformers_config.yaml" \
-    --gpus 4 \
-    --memory 40 \
-    --time 12
+    --gpus 4
 ```
 
 ### 5. LoRA Fine-tuning (Parameter-Efficient)
@@ -102,9 +92,7 @@ cp examples/lora_config.yaml .
 # Submit LoRA training job (a 7B LoRA fits well under 40 GB)
 gpuq submit \
     --command "python lora_example.py --mode train --model microsoft/DialoGPT-medium --config lora_config.yaml" \
-    --gpus 1 \
-    --memory 20 \
-    --time 6
+    --gpus 1
 ```
 
 ## 📊 What These Examples Demonstrate
@@ -254,15 +242,18 @@ watch -n 5 nvidia-smi
 gpuq status
 watch -n 10 gpuq status
 
-# gpuq runs your job in the FOREGROUND and streams stdout/stderr to your
-# terminal — there are no per-job log files. Capture output yourself if you
-# want something to tail:
+# gpuq runs your job in your terminal and streams stdout/stderr to it.
+# Capture output yourself if you want something to tail:
 gpuq submit --command "python train.py" --gpus 1 > train.log 2>&1
 # then, in another shell:
 tail -f train.log
 
-# For long runs, launch inside tmux/screen (or use nohup) so the job
-# survives a disconnect:
+# Or add --detach: gpuq returns at once, the job keeps running after you
+# log out, and its output goes to ~/gpuq-logs/<id>.log:
+gpuq submit --detach --command "python train.py" --gpus 1
+
+# Without --detach, closing the terminal stops the job. For long runs,
+# launch inside tmux/screen so the job survives a disconnect:
 #   tmux new -s train
 #   gpuq submit -- python train.py 2>&1 | tee train.log
 ```
@@ -312,13 +303,10 @@ nvidia-smi
 gpuq status
 
 # Common issues:
-# - No GPU matches your request. By default `gpuq submit` does NOT wait — if no
-#   free (or owned-by-you) GPU meets your --gpus / --memory request, it is
-#   rejected immediately. Add --queue to wait for a slot.
-# - --devices pinned to a GPU another user holds (rejected immediately unless
-#   you add --queue).
-# - --memory floor set too high (e.g. 100 GB skips any card with less than
-#   100 GB free). Set it just above your job's real peak usage, not the GPU size.
+# - Others are using the GPUs. Every submit waits in line; when more people
+#   want GPUs than there are, whoever has used the fewest GPU-hours lately
+#   goes first. `gpuq why <id>` shows why your job waits and when it should start.
+# - --devices on a GPU you have no job on is refused: use --gpus for new GPUs.
 # - Syntax error in command
 ```
 
@@ -353,7 +341,7 @@ To add new examples or improve existing ones:
 
 If you encounter issues with these examples:
 
-1. **Check your job output**: `gpuq` streams stdout/stderr to the terminal that ran `gpuq submit` — redirect it to a file (e.g. `> train.log 2>&1`) to keep a log. There is no `/tmp/gpu_queue/logs` directory.
+1. **Check your job output**: `gpuq` streams stdout/stderr to the terminal that ran `gpuq submit` — redirect it to a file (e.g. `> train.log 2>&1`) to keep a log. A `--detach` job writes to `~/gpuq-logs/<id>.log`.
 2. **Review documentation**: Especially the [troubleshooting guide](../docs/troubleshooting.md)
 3. **Test with minimal examples**: Start with simple cases
 4. **Monitor resources**: Use `nvidia-smi` and `gpuq status`

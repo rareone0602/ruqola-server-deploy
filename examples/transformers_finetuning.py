@@ -4,7 +4,7 @@ Hugging Face Transformers Fine-tuning Example for H200 GPUs
 Demonstrates efficient fine-tuning of large language models with various optimization techniques.
 
 Usage:
-gpuq submit --command "python transformers_finetuning.py --config transformers_config.yaml" --gpus 2 --memory 100 --time 12
+gpuq submit --command "python transformers_finetuning.py --config transformers_config.yaml" --gpus 2
 
 Features:
 - Support for full fine-tuning and LoRA

@@ -4,7 +4,7 @@ TensorFlow Training Example for H200 GPUs
 Demonstrates best practices for efficient TensorFlow training on the Ruqola server.
 
 Usage:
-gpuq submit --command "python tensorflow_training.py --config tf_config.json" --gpus 1 --memory 60 --time 8
+gpuq submit --command "python tensorflow_training.py --config tf_config.json" --gpus 1
 
 Features:
 - Mixed precision training (FP16)

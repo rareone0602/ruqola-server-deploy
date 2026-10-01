@@ -24,10 +24,10 @@ Host `wsserver1`: 4× H200 NVL (compute capability 9.0), 256 logical CPUs,
 
 | Rule | Setting |
 |---|---|
-| Starting GPU work | Only through `gpuq submit`. Anything else gets a warning email and is killed at the first audit 15 minutes or more later. The audit runs every 15 minutes. |
-| Job time | 48 hours at most (`-t`). Longer work must checkpoint and resubmit. |
-| Cards per user | 3 at once. Holding 3 alerts the admin, so use 2 unless you need 3. |
-| GPU-hours | 168 per user per rolling 7 days. Over that, a new job waits 15 minutes, then runs at low priority. It is never refused. |
+| Starting GPU work | Only through gpuq (`gpuq submit`, or `gpuq shell` for interactive work). gpuq records GPU use outside it, and will stop it automatically in a later step. |
+| Job time | 48 hours for every job. Longer work must checkpoint and resubmit. |
+| Who goes first | When more people want GPUs than there are, whoever has used the fewest GPU-hours lately. Use fades by half every 7 days. |
+| Your GPU | A GPU your job runs on is yours: nobody else's job is put on it. A job may ask for up to all 4. |
 | Home directory | 90 GiB soft, 100 GiB hard disk quota. Check with `quota -s`. |
 | `/scratch` | Files neither read nor modified for 180 days are deleted. `/scratch/datasets` is exempt. |
 

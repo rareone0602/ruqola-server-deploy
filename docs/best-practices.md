@@ -27,22 +27,21 @@ pip install -r requirements.txt
 
 ## Before a big job
 
-- **Test small first:** `gpuq submit -m 20 -t 0.5 -- python train.py --epochs 1`.
+- **Test small first:** `gpuq submit -m 20 -- python train.py --epochs 1`.
+  With `-m 20` the test runs beside your own running job if 20 GB is free
+  there, else on a free GPU.
 - **Save checkpoints and resume from them.** No job runs longer than 48 hours.
   At its limit a job gets SIGTERM, then SIGKILL 10 seconds later.
-- **Set `-m`** to the memory your job needs, not more.
-- **Set `-t`** to the expected runtime plus a margin. The quota check counts it
-  at submit.
-- **Save the output:** `gpuq submit ... 2>&1 | tee run.log`, inside tmux.
-- **Check `gpuq quota`.** Over 168 GPU-hours in the rolling 7-day window, new
-  jobs wait 15 minutes and then run at low priority.
+- **Leave out `-m`** for a big job: it then gets a GPU to itself.
+- **Save the output:** `gpuq submit ... 2>&1 | tee run.log`, inside tmux. Or use
+  `gpuq submit --detach`: the output goes to `~/gpuq-logs/<id>.log`.
 - **Tell the group** before a long run on several cards.
 
 ## While it runs
 
 - Keep every card you hold busy. If a job is idle or no longer needed, stop it
   with `gpuq kill <id>`.
-- Use 2 cards unless you need 3.
+- Ask only for the cards your job will use.
 - Do not submit the same job twice.
 - CPUs and RAM are shared too: 256 CPUs and 755 GiB for everyone. Give the
   DataLoader the workers it needs (8 is a good start), not the whole machine.

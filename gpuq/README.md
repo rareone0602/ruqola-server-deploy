@@ -1,283 +1,216 @@
 # gpuq Reference
 
-How gpuq works, how to deploy and configure it, and what its audit does. For
-everyday use (submit, status, kill, flags, waiting), read the
+How gpuq works, how to install and update it, and what it records. For everyday
+use (submit, status, sharing your own GPU, waiting), read the
 [gpuq User Guide](https://rareone0602.github.io/ruqola-server-deploy/#gpuq/gpu-queue-guide).
 Values are the live settings on Mjölnir (`wsserver1`, GPUs `0`–`3`; see
 [H200 Specs](https://rareone0602.github.io/ruqola-server-deploy/#hardware/h200-specs)).
+The rules, and why each was chosen, are in `docs/v3-design.md` in the gpuq
+repo. This version (v3) has been live since 2026-10-01 20:33.
 
 ## How gpuq works
 
-- **No daemon.** `gpuq submit` claims GPUs, sets `CUDA_VISIBLE_DEVICES` and
-  `GPUQ_JOB_ID`, runs the command, and stays in the foreground as the job's
-  supervisor: SIGTERM at the `-t` limit, SIGKILL 10 s later, a ledger record at
-  the end.
-- **Shared state** is in `/var/lib/gpu_queue/` (`root:gpuqueue`, `2775`), so
-  every gpuq user must be in `gpuqueue`. Changes take an exclusive `flock` on its
-  `.lock`; JSON files are replaced by atomic rename. `nvidia-smi` calls time out
-  after 15 s, so a wedged driver cannot hold the lock.
-- **Polling.** A free slot goes to whichever waiter polls first: every 30 s, or
-  120 s when over quota. The queue order in `gpuq status` is informational.
-- **Tracking.** A job runs in its own `systemd --user` scope (`gpuq-<id>.scope`)
-  if its user lingers (`sudo loginctl enable-linger <user>`; enable it for every
-  GPU user), else in its own process group. The audit uses both, plus the
-  parent chain. Linger does not save a job from a closed terminal: gpuq forwards
-  SIGHUP, SIGINT and SIGTERM to the job.
+- **One root service runs the queue.** `gpuqd.service` is the only writer of the
+  queue and the ledger. Every 30 s, at once on a submit, and whenever a job ends,
+  it reads the cards with `nvidia-smi`, asks the planner (`scheduler/planner.py`)
+  what to do, and starts what the plan says.
+- **Clients talk to it over a socket.** `/usr/local/bin/gpuq` connects to
+  `/run/gpuq/gpuqd.sock` (mode `0666`: every local account, no group). Who is
+  asking comes from the kernel (`SO_PEERCRED`), never from the request.
+- **Each job is its own systemd unit,** `gpuq-job-<id>.service` in `gpuq.slice`,
+  run as its submitter (`systemd-run --uid`):
+  - it may open only its own `/dev/nvidiaN`, plus the shared control devices
+    (`DevicePolicy=closed`, `DeviceAllow=`). Device files are found by UUID,
+    because on this host `/dev/nvidiaN` does not follow `nvidia-smi`'s numbering;
+  - systemd stops it at its deadline even if gpuqd is down (`RuntimeMaxSec`,
+    SIGTERM, then SIGKILL after `TimeoutStopSec=10`);
+  - it gets the submitting shell's umask and limits (systemd's defaults are far
+    lower: 1,024 open files, 8 MiB locked memory);
+  - a root exit hook records how it ended, so a gpuqd restart loses nothing.
+- **Attached, shell, detached.** An attached job writes to the submitter's own
+  terminal (`--pipe`); `gpuq shell` gets a terminal forwarded to the client's
+  (`--pty`); a detached job writes to `~/gpuq-logs/<id>.log`.
+- **Restarting gpuqd touches no job** (`KillMode=process`). Waiting and attached
+  clients reconnect by themselves within 120 s.
 
-| File in `/var/lib/gpu_queue/` | Contents |
+| Path | Contents |
 |---|---|
-| `running.json` | running jobs: user, GPUs, `-m`, `-t`, supervisor `pid`, child process group, scope, command |
-| `jobs.json` | queued submits, with `priority` and `hold_until` |
-| `usage.jsonl` | the [job ledger](#job-ledger) |
-| `untracked_state.json`, `rebind_state.json` | audit offenders: first seen, last email |
-| `gpuq.py` | retired shared copy; `retire_shared_copy.sh` removes it (see below) |
-| `kill.json`, `last_resource_notification.json`, `logs/` | leftovers of the retired daemon; unused |
+| `/var/lib/gpuq/state.json` | running and waiting jobs, and the promises (root only) |
+| `/var/lib/gpuq/usage.jsonl` | the [job ledger](#job-ledger) (`0644`) |
+| `/var/lib/gpuq/exits/` | exit reports from the exit hook (root only) |
+| `/var/lib/gpuq/launch/` | each job's command, environment and folder, readable only by its user |
+| `/var/lib/gpuq/legacy.json` | the previous gpuq's jobs at cutover (root only) |
+| `/etc/gpuq/mail.json` | SMTP settings, with the password (root only) |
+| `/usr/local/lib/gpuq-v3/` | the code: `scheduler/`, `gpuqd/`, `gpuqcli/` |
+| `/usr/local/lib/gpuq-v2/gpuq` | the previous client, for `--rollback` (removed by `--retire`) |
 
-**Reaping.** Every `submit`, `status`, `kill` and `audit` first drops dead
-entries. A running entry lives while its supervisor or its child process group
-does (an orphan still holds its GPU); start times guard against recycled PIDs.
-A dead job gets a `lost` record, a dead waiter a `cancelled` one.
+**Logs:** `journalctl -u gpuqd` has every submit, start, end and cancel, and
+each GPU process seen outside gpuq. It needs `sudo` or the `systemd-journal`
+group.
 
-**Stopping another user's job.** `gpuq kill` works only on your own jobs. As
-root, `kill <pid>` the job's supervisor (`pid` in `running.json`); it forwards
-the SIGTERM and records the end.
+**Stopping another user's job:** `sudo gpuq kill <id>`. Root may kill any job.
 
-## Install and deploy
+## The rules
 
-Both installers read `../gpuq/userspace.py` relative to their own folder, so
-run them from a gpuq checkout whose folder is named `gpuq`.
+1. **Fair-share.** When more people want GPUs than there are, whoever has held
+   the fewest GPU-hours lately goes first. Use fades by half every 7 days.
+   Within one pass, everyone waiting gets one turn before anyone gets a second.
+2. **A job that fits now starts now,** unless it would still be running when a
+   GPU it wants is promised to someone ahead of it.
+3. **Promises.** The first job that does not fit is promised the earliest moment
+   enough GPUs free up, and those GPUs are held for it. A job needing 2+ GPUs
+   keeps its promise: later arrivals plan around it.
+4. **48 hours per job.** The one policy number (`MAX_RUNTIME_H` in
+   `scheduler/model.py`). There is no `-t`, quota, hold or card cap.
+5. **Your GPU is yours.** Nobody else's job is put on a GPU your job runs on.
+   `-m X` lets your job join your own GPU when X GB is measured free there.
+   `--devices N` adds a job to your GPU N without waiting in line, and it ends
+   when your jobs on N reach their 48 h. Fair-share charges each GPU once,
+   however many of your jobs share it.
 
-```bash
-sudo ./install_system.sh             # userspace.py -> /usr/local/bin/gpuq
-./install_user.sh                    # link ~/.local/bin/gpuq -> /usr/local/bin/gpuq (optional)
-```
+`gpuq status` shows the queue in the order GPUs go out, with promised and
+estimated start times. `gpuq why <id>` explains one job's wait.
 
-`install_system.sh [--source PATH]` re-runs itself under `sudo` if needed. It
-refuses a source that does not compile, backs up the old binary to
-`/usr/local/bin/gpuq.bak-<YYYYmmdd-HHMMSS>`, installs atomically
-(`0755 root:root`), runs `gpuq --help`, creates `/var/lib/gpu_queue` if missing
-(the `gpuqueue` group must exist), and writes a starter config only if none
-exists. `./install.sh --check` in `ruqola-server-deploy/scripts` then reports the
-backup as drift; `sudo ./install.sh` there retires it.
+## Install, update, roll back
 
-`/usr/local/bin/gpuq` is the only copy anyone should run, and `install_system.sh`
-is the only way to publish one. `install_user.sh` needs no root: it links
-`~/.local/bin/gpuq` to `/usr/local/bin/gpuq`, or with `--copy-from-repo` makes a
-private copy for testing. `--symlink-shared`, `--copy-shared` and
-`--publish-shared` are retired; they say so and make the link instead.
-
-**The shared copy is retired (E2).** Users used to run
-`/var/lib/gpu_queue/gpuq.py`, but that directory is writable by every
-`gpuqueue` member, so any of them could replace what everyone ran. Retire it once:
+Run from a gpuq checkout:
 
 ```bash
-sudo ./retire_shared_copy.sh           # dry run: lists each user's ~/.local/bin/gpuq
-sudo ./retire_shared_copy.sh --apply   # re-point links to the shared copy, then remove it
+sudo ./install_v3.sh              # first run: cut over; later runs: update
+sudo ./install_v3.sh --rollback   # back to the previous gpuq; refused while gpuqd has jobs
+sudo ./install_v3.sh --retire     # after the previous gpuq's last jobs end (see below)
 ```
 
-It changes each link as its owner, and keeps the link's path, so open shells
-keep working. Private copies and other links are listed, not touched. If any
-link cannot be changed, the shared copy stays.
+- **Update** installs the code and the client and restarts gpuqd. Running jobs
+  carry on.
+- **The cutover** (done 2026-10-01) refused while anyone waited in the previous
+  queue, wrote `/etc/gpuq/mail.json` from the previous config, swapped
+  `/usr/local/bin/gpuq`, and copied the previous ledger. The previous gpuq's
+  running jobs kept their GPUs until they ended. Their end records were copied
+  over.
+- **`--retire`** refuses while any of those jobs runs. Then it archives
+  `/var/lib/gpu_queue`, `/usr/local/bin/gpu_queue_config.json` (which holds the
+  mail password and is readable by members) and `/usr/local/lib/gpuq-v2` into a
+  root-only tarball in `/var/backups`, and removes them. After it, `--rollback`
+  is no longer possible.
+- **Leftovers to remove after `--retire`:** root's cron line
+  `*/15 * * * * /usr/local/bin/gpuq audit --enforce --quiet`, which does nothing
+  now, and the disabled `gpu-queue.service` of the retired root daemon.
 
-**The deployed binary matches the repo** (since 2026-09-30). **Never run
-`gpuq config init --force` on the live host:** it replaces the live config with
-the built-in template, which has no mail or Slack credentials, both audit
-detectors off, and a default `-t` of 24 h instead of the live 48 h.
+**Before a risky change, run the root smoke check** from the gpuq checkout. It
+runs real units through gpuqd's own runner on two idle GPUs, with its state in a
+temporary folder:
 
-**Retired daemon.** Never deploy the repo's `gpu_queue.py`.
-`/etc/systemd/system/gpu-queue.service` still calls the removed `gpuq daemon`,
-as root with `Restart=always`. It is disabled; keep it so.
+```bash
+sudo env PYTHONPATH=$PWD python3 -m gpuqd.smoke --cards 0,1 --python ~/venvs/nlgen/bin/python
+```
 
 ## Config
 
-`/usr/local/bin/gpu_queue_config.json`, `0640 root:gpuqueue`. It holds the SMTP
-password and the Slack webhook: never commit it or make it world-readable (a
-starter config is `0644`). gpuq reads it on every command, so edits apply at
-once; `gpuq config` shows the values in force. If a user cannot read it or it
-is invalid JSON, gpuq warns and falls back to no quota, no card cap, `-t` 24 h
-and `-m` 70 GB.
+There is no config file. The one policy number, 48 h, is in the code;
+`gpuq config` shows it and where things are. The only settings are the mail
+settings, `/etc/gpuq/mail.json` (`0600 root`):
 
-| Key | Live | If missing | Effect |
-|---|---|---|---|
-| `max_job_time_hours` | 48 | 24 | default `-t`, hours |
-| `max_job_time_hours_cap` | 48 | 48 | largest `-t` (a larger default is lowered to it); `0` = no cap |
-| `default_min_free_gb` | not set | | default `-m`: GB of free VRAM a card needs |
-| `max_memory_per_gpu_gb` | 120 | 70 | default `-m` when `default_min_free_gb` is not set (live: 120 GB) |
-| `max_gpus_per_user_hard` | 3 | 0 (off) | most distinct cards per user; at the cap, jobs can only stack |
-| `quotas.default_gpu_hours_per_week` | 168 | 0 | budget per rolling 7 days; `0` = unlimited |
-| `quotas.users` | `{}` | | per-user budgets, e.g. `{"alice": 250}` |
-| `quotas.delay_hours` | 0.25 | 0 | over-quota hold, hours |
-| `audit.max_gpus_per_user` | 2 | 2 | breach above this many cards |
-| `audit.max_total_memory_gb` | 320 | 50 | breach above this sum of `-m` × cards over a user's jobs |
-| `audit.notify_untracked`, `audit.notify_rebind` | true | false | detectors on |
-| `audit.untracked_min_memory_mb`, `audit.rebind_min_memory_mb` | 512 | 512 | ignore smaller processes |
-| `audit.untracked_grace_seconds`, `audit.rebind_grace_seconds` | 120 | 120 | ignore processes this long after a job starts |
-| `audit.untracked_grace_hours`, `audit.rebind_grace_hours` | 0.25 | 24 | warning-to-kill deadline |
-| `audit.untracked_reminder_hours`, `audit.rebind_reminder_hours` | 2 | 6 | least time between emails to one offender |
-| `audit.untracked_allowlist` | `[]` | `[]` | full login names never flagged |
-| `notification_email.enabled` | true | false | send email |
-| `notification_email.smtp_server`, `.smtp_port`, `.username`, `.password` | set | port 587 | SMTP login; `username` is also the sender |
-| `notification_email.admin_email` | set | | gets audit summaries |
-| `slack.enabled`, `slack.webhook_url` | true, set | false | post audit summaries to this Incoming Webhook |
-| `slack.channel` | | | a note; never read |
+```json
+{"enabled": true, "smtp_server": "...", "smtp_port": 587, "username": "...", "password": "..."}
+```
 
-"If missing" gives the deployed binary's fallbacks. A non-number (`true`
-included) in `max_gpus_per_user_hard` or `quotas.delay_hours` turns that
-feature off, with a warning.
+The installer writes it once, at cutover, and keeps it on updates. Edit it as
+root, then `sudo systemctl restart gpuqd`.
 
 ## Job ledger
 
-`/var/lib/gpu_queue/usage.jsonl` has one JSON record per line, appended under
-the lock. `gpuq history` and `gpuq quota` read it and skip bad lines. To rotate,
-move it to `usage-YYYY-MM.jsonl` in the same folder; readers take every
-`usage-*.jsonl`, sorted, before `usage.jsonl`.
+`/var/lib/gpuq/usage.jsonl`, one JSON record per line. It uses the same format
+(ledger v2) as before the cutover, which copied the old ledger in, so
+`gpuq history` and fair-share see the whole history. Only gpuqd writes it.
+Readers skip bad lines. To rotate, move it to `usage-YYYY-MM.jsonl` in the same
+folder; readers take every `usage-*.jsonl`, sorted, before `usage.jsonl`.
 
 | `event` | Written when | Notes |
 |---|---|---|
-| `end` | a job ended | the only type charged to quota; fields below |
-| `cancelled` | a queued submit never ran | adds `at`, `wait_sec`, `reason`: `user` (Ctrl-C or `gpuq kill`), `signal` (SIGTERM or SIGHUP), `lost` (the waiter died) or `stale` (`gpuq kill` found it dead) |
-| `rejected` | a submit was refused | no `id`; adds `at`, `reason`: `no_free_gpu`, `devices_unavailable` or `user_card_cap` |
-
-A line with no `event` (from before ledger v2, no `v`) counts as `end`. Many
-rejections with little usage mean a starved user, not an idle one.
+| `end` | a job ended | the record fair-share charges; fields below |
+| `cancelled` | a job left the queue without running | adds `at`, `wait_sec`, `reason`: `user` (Ctrl-C or `gpuq kill`), `signal`, `lost` (its client never came back), `released` (a `--devices` job whose GPU's jobs all ended first) |
+| `rejected` | before the cutover only | gpuqd refuses bad requests at once and records nothing |
 
 ```json
-{"v":2,"event":"end","id":441840678,"user":"alice","host":"wsserver1","command":"python train.py","name":"run1","gpus_requested":1,"gpus":[3],"devices":[3],"memory_gb":20,"max_time_hours":6.0,"priority":"low","over_quota_at_submit":true,"submitted_at":"2026-09-30T17:25:06","started_at":"2026-09-30T17:41:10","ended_at":"2026-09-30T17:45:50","queue_wait_sec":964,"elapsed_hours":0.0779,"gpu_hours":0.0779,"exit_code":0,"end_reason":"completed"}
+{"v":2,"id":945363310,"user":"alice","host":"wsserver1","command":"nvidia-smi -L","name":null,"gpus_requested":1,"devices":null,"memory_gb":null,"max_time_hours":48.0,"priority":"normal","submitted_at":"2026-10-01T20:47:05","event":"end","gpus":[1],"over_quota_at_submit":false,"started_at":"2026-10-01T20:47:05","ended_at":"2026-10-01T20:47:06","queue_wait_sec":0,"elapsed_hours":0.0002,"gpu_hours":0.0002,"exit_code":0,"end_reason":"completed"}
 ```
 
 | `end` field | Meaning |
 |---|---|
 | `command` | first 300 characters |
-| `gpus_requested`, `gpus`, `devices` | cards asked for, granted, and pinned with `--devices` |
-| `memory_gb`, `max_time_hours` | the `-m` and `-t` in force |
+| `gpus_requested`, `gpus` | GPUs asked for, and the host's numbers of those it got |
+| `devices` | the GPUs a `--devices` job joined; else null |
+| `memory_gb` | the `-m`; null = a GPU to itself |
+| `max_time_hours` | the job's limit: 48, or less for a `--devices` job |
 | `*_at` | local time, to the second |
 | `gpu_hours` | `elapsed_hours` × number of `gpus` |
-| `exit_code` | the job's return code; `-N` = killed by signal N; null for `lost` |
-| `end_reason` | `completed` (exit 0), `failed`, `killed` (signal), `timed_out` (hit `-t`), `lost` |
-| `synthetic` | `true` on `lost` records: supervisor and job both died unaccounted (a SIGKILLed supervisor, a reboot); charged from start to reap, capped at `-t`; no email |
+| `exit_code` | as a shell reports it: 143 for SIGTERM (128 + signal); null for `lost` |
+| `end_reason` | `completed` (exit 0), `failed`, `killed` (`gpuq kill`, a closed terminal, a signal), `timed_out` (hit 48 h), `lost` |
+| `synthetic` | `true` when gpuqd had to write the record itself: a job whose unit vanished with no exit report (`lost`), or a previous-gpuq job with no end record of its own |
+| `priority`, `over_quota_at_submit` | always `normal` and `false` now; kept so older readers work |
 
-## Quotas
+**Fair-share** reads `end` records and running jobs as GPU-hours **held**:
+overlapping jobs of one user on one GPU count once. Use fades by half every 7
+days. `gpuq share --all` shows everyone's.
 
-- **Budget:** `quotas.users[<user>]`, else `quotas.default_gpu_hours_per_week`
-  (live: 168 for everyone).
-- **Usage:** `gpu_hours` of `end` records in the last 168 h (a job crossing the
-  cutoff counts only its share inside), plus running jobs at elapsed × cards.
-- **At submit:** over when usage + cards × `-t` > budget, `--devices` or not.
-- **Over budget:** never refused. gpuq prints `[gpuq] over quota: used ...`,
-  emails the user once, and queues the job at `priority: low` with `hold_until`
-  = now + `quotas.delay_hours` (15 min). After the hold it polls every 120 s and
-  yields while any normal-priority waiter could claim a slot.
+## GPU use outside gpuq
 
-```bash
-gpuq quota --all                # every user (or --user NAME); host use against 4 × 168 = 672 GPU-h
-gpuq quota --report --weeks 8   # per user per ISO week: P50/P95/max/mean GPU-h, waits, timeout/lost/pinned %
-```
+`/dev/nvidia*` is world-accessible, so a process can use a GPU without gpuq. A
+job's processes are exactly its unit's cgroup
+(`/gpuq.slice/gpuq-job-<id>.service`), so gpuqd knows for sure which GPU
+processes are not part of any job. Accounts below uid 1000 are skipped.
 
-`--report` counts a multi-day job in the week it ended.
+- **Now:** each pass, gpuqd logs such a process on its second sighting, at
+  least 60 s after the first: `rule 4 would stop pid ...` in the journal. A GPU
+  held outside gpuq is never given out, and `gpuq status` lists it under "GPU use
+  outside gpuq".
+- **Later:** stopping these processes is the next step of the rollout
+  (docs/v3-design.md §10, step 4). It is not built yet.
 
-## Audit
-
-`/dev/nvidia*` is world-accessible, so gpuq cannot block GPU use outside it;
-the audit finds and kills it. Root's crontab runs it every 15 minutes:
-
-```
-*/15 * * * * /usr/local/bin/gpuq audit --enforce --quiet
-```
-
-Each run drops dead entries, then flags:
-
-- users on more than `audit.max_gpus_per_user` cards (live: 3 or more);
-- users whose `-m` × cards over all jobs exceeds `audit.max_total_memory_gb`
-  (live: 320 GB, which three jobs at the default `-m` 120 exceed);
-- users over budget, including users with no running job;
-- untracked processes and rebinds.
-
-On any breach it emails the list to `admin_email` as
-`[gpuq] resource breaches on <host>`, posts it to Slack, and exits `1`. A clean
-run exits `0`, silently with `--quiet`. Nothing is de-duplicated: a standing
-breach, such as a user on 3 cards, is re-sent every run.
-
-`--enforce` adds the kills. Without root it kills only your own processes and
-prints `[gpuq audit] cannot signal process group N (needs sudo/root); leaving it
-for the admin.` for others. If `nvidia-smi` fails, the detectors skip the run.
-
-**Untracked:** a GPU process (owner from `ps -o user:32=`) in no running job's
-scope, process group or process tree. Skipped: system accounts (`root`,
-`nobody`, `gdm`, `lightdm`, `sddm`, `systemd+`, `_apt`, `nvidia-persistenced`),
-`untracked_allowlist`, processes under `untracked_min_memory_mb`, users whose
-newest job started under `untracked_grace_seconds` ago, and MIG instances. One
-offender is one (user, process group).
-
-**Rebind:** a job's process on a GPU outside the job's `gpus`, usually because
-the script set `CUDA_VISIBLE_DEVICES` or `--gpu N` itself. Stacking on your own
-card is not a rebind. Skipped: processes under `rebind_min_memory_mb` and jobs
-younger than `rebind_grace_seconds`; no allowlist. One offender is one (job,
-process group).
-
-| Audit run | Action, email to the offender | Admin summary |
-|---|---|---|
-| first sighting | warning; deadline = now + `*_grace_hours` | listed |
-| before the deadline | reminder every `*_reminder_hours` | listed |
-| deadline passed, `--enforce` | SIGTERM to the process group, SIGKILL 10 s later if needed; `... was KILLED` | `PAST DEADLINE - enforcing` |
-| deadline passed, no kill | `... PAST DEADLINE` every `*_reminder_hours` | `PAST DEADLINE - escalated to admin` |
-
-A kill first re-checks the sampled PID's owner and process group. A live group
-missed for one run keeps its deadline; a recycled group number gets a fresh one.
-
-**On this host** (15-minute cron, 15-minute grace) the kill comes at the next
-run or the one after, 15 to 30 minutes after the warning; no reminder is sent.
+`gpuq audit` is accepted and does nothing, so old cron lines stay quiet.
 
 ## Notifications
 
-The user side is in the
-[Notifications FAQ](https://rareone0602.github.io/ruqola-server-deploy/#gpuq/notifications-faq).
+gpuqd sends every email itself, as root, on a background thread, so a slow mail
+server never stalls the queue.
 
-| Email subject | Sent by | To |
-|---|---|---|
-| `[gpuq] job <id> <end_reason>` (every end except `lost`) | the user's `gpuq submit` | `--notify`, else account |
-| `[gpuq] <user>: GPU-hour quota exceeded - job deprioritized` | the user's `gpuq submit` | `--notify`, else account |
-| `[gpuq] <user>: untracked GPU process on <host>`, `[gpuq] <user>: GPU rebind on <host> (job <id>)`, with `reminder —`, `PAST DEADLINE` and `was KILLED` variants | root's audit | account |
-| `[gpuq] resource breaches on <host>` | root's audit | `admin_email` |
+| Email subject | When |
+|---|---|
+| `[gpuq] job <id> started on GPU(s) <list>` | a job that waited 10 minutes or more starts |
+| `[gpuq] job <id>: 1 hour left` | 1 hour before the job's deadline |
+| `[gpuq] job <id> <end_reason>` | the job ended, only if submitted with `--notify` |
+| `[gpuq] job <id> cancelled` | a detached `--devices` job whose GPU's jobs all ended first |
 
-- **Sending:** SMTP with STARTTLS. Users' own gpuq processes send mail, so they
-  must read the config. The sender, `mjolnirruqola@gmail.com`, uses a Gmail app
-  password (credentials in the lab OneDrive folder `mjolnir`, unverified). The
-  scratch and disk-quota scripts share the account and its daily limit.
-- **Account address:** the first email address in the user's GECOS field
-  (`getent passwd <user>`). `create_users` sets it with `chfn -o`; change it with
-  `sudo chfn -o <address> <user>`. No address, no email; the admin summary
-  still lists the breach.
-- **Slack:** only the audit summary posts. It needs Python `requests`
-  (`python3-requests`, installed), or Slack is skipped silently.
-- A failed send prints `warning: email notification failed: ...` or
-  `warning: slack notification failed: ...`; gpuq carries on.
+- **Sending:** SMTP with STARTTLS. The sender is `username` in
+  `/etc/gpuq/mail.json`, `mjolnirruqola@gmail.com`, with a Gmail app password.
+  The scratch and disk-quota scripts share the account and its daily limit.
+- **Address:** only the account's own address, the first email address in its
+  GECOS field (`getent passwd <user>`). `create_users` sets it with `chfn -o`;
+  change it with `sudo chfn -o <address> <user>`. No address, no email. An
+  address given to `--notify` is ignored.
+- There are no quota, audit or Slack messages any more.
 
 ## Local development
 
-The repo's `userspace.py` is what gets deployed. These variables let it run
-without a GPU or root:
+```bash
+python3 -m pytest tests/ -q       # from the gpuq repo root; about 3 minutes
+```
+
+The suite is hermetic. `tests/daemon_world.py` fakes the host for gpuqd: 4 H200s
+through `tests/fake_nvidia_smi.py`, a fake `/proc`, and a fake systemd that
+records what it was asked to do. `tests/test_gpuq_client.py` runs the real
+client against a real gpuqd socket loop, with jobs as plain processes through
+the real `launch.py` and `exithook.py`. These variables point a client or gpuqd
+at a test setup:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GPUQ_QUEUE_DIR` | `/var/lib/gpu_queue` | state folder |
-| `GPUQ_CONFIG_FILE` | `/usr/local/bin/gpu_queue_config.json` | config |
+| `GPUQ_SOCKET` | `/run/gpuq/gpuqd.sock` | the socket |
+| `GPUQD_STATE_DIR` | `/var/lib/gpuq` | state and ledger |
 | `GPUQ_NVSMI` | `nvidia-smi` | the `nvidia-smi` to run |
-| `GPUQ_SCOPE` | `auto` | `off`: process group only; `on`: scope even without linger |
-| `GPUQ_DEPRIORITIZED_POLL_SEC` | `120` | over-quota poll interval |
+| `GPUQD_LIB` | `/usr/local/lib/gpuq-v3` | where a job's launcher and exit hook live |
 
-`tests/fake_nvidia_smi.py` answers like `nvidia-smi` from the JSON file in
-`FAKE_NVSMI_STATE` (example: `tests/states/two_idle_gpus.json`).
-
-Run the tests from the gpuq repo root. The host has no conda, and pip works only
-in a venv:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r tests/requirements.txt
-.venv/bin/python -m pytest tests/ -q
-```
-
-`tests/conftest.py` sets `GPUQ_QUEUE_DIR`, `GPUQ_CONFIG_FILE`, `GPUQ_NVSMI` and
-`GPUQ_SCOPE=off`, so the suite never touches live state. Kill tests skip when
-run as `root`. To run `./userspace.py` by hand, export the same four variables
-and `FAKE_NVSMI_STATE` first, or it acts on live state.
+The previous gpuq's code (`userspace.py`, `install_system.sh`,
+`install_user.sh`) and its tests are still in the repo, but no longer installed.
+`--rollback` uses the copy in `/usr/local/lib/gpuq-v2`.

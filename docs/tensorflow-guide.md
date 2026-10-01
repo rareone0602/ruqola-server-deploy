@@ -22,7 +22,7 @@ pip install -U "tensorflow[and-cuda]"
 # pip install "tensorflow[and-cuda]>=2.16"
 
 # Verify GPU detection (through gpuq, like any GPU work)
-gpuq submit -m 2 -t 0.1 -- python -c "import tensorflow as tf; print('GPUs:', tf.config.list_physical_devices('GPU'))"
+gpuq submit -m 2 -- python -c "import tensorflow as tf; print('GPUs:', tf.config.list_physical_devices('GPU'))"
 ```
 
 The H200 reports compute capability **9.0** (Hopper, `sm_90`). Any reasonably current TF 2.x build supports it; newer releases ship better Hopper kernels.
@@ -37,7 +37,7 @@ export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 ```
 
 > Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs
-> it gave you. Overriding it runs the job on a card it was not given, and the audit kills it
+> it gave you. A job can reach only its own GPUs, so any other number finds no GPU
 > (see the [GPU Queue guide](gpu-queue-guide.md)).
 
 ### Verify Installation
@@ -468,20 +468,16 @@ def multi_gpu_training():
 ### Multi-GPU Job Submission
 
 ```bash
-# Submit a 3-GPU TensorFlow job (3 is the per-user maximum — `-g 4` is
-# refused by the queue's concurrent-card cap).
-# -m/--memory is the MINIMUM free VRAM (GB) a candidate GPU must have to be
-# picked — it is an admission requirement, not a hard cap or reservation.
-# The job runs in the FOREGROUND in this terminal; redirect output yourself
-# if you want a log file.
+# Submit a 3-GPU TensorFlow job (a job may ask for up to 4, the whole host).
+# Leave out -m/--memory: without it each GPU is this job's alone.
+# The job waits its turn, then runs in this terminal. Run it inside tmux, or
+# add --detach (the output then goes to ~/gpuq-logs/<id>.log).
 gpuq submit \
   --command "python train_tensorflow.py --strategy=mirrored" \
-  --gpus 3 \
-  --memory 40 \
-  --time 12
+  --gpus 3
 
 # For a 2-GPU run, just ask for 2:
-gpuq submit --command "python train_tensorflow.py --strategy=mirrored" --gpus 2 --memory 40 --time 12
+gpuq submit --command "python train_tensorflow.py --strategy=mirrored" --gpus 2
 ```
 
 > Inside the job, read `strategy.num_replicas_in_sync` rather than hard-coding a
@@ -532,8 +528,8 @@ model = LargeTransformer(vocab_size=50000)
 ```
 
 With ~141 GB of VRAM per H200, a single card holds substantial models; use
-`MirroredStrategy` across up to 3 GPUs (the per-user card cap), or model
-parallelism, only when one card is not enough.
+`MirroredStrategy` across up to 4 GPUs, or model parallelism, only when one
+card is not enough.
 
 ### Hugging Face Transformers with TensorFlow
 
@@ -780,7 +776,7 @@ for x_batch, y_batch in dataset:
 #!/usr/bin/env python3
 """
 H200-Optimized TensorFlow Training Script
-Usage: gpuq submit --command "python train_tf_h200.py --config config.json" --gpus 1 --memory 40
+Usage: gpuq submit --command "python train_tf_h200.py --config config.json" --gpus 1
 """
 
 import tensorflow as tf
@@ -1011,16 +1007,12 @@ if __name__ == '__main__':
 SCRIPT_PATH="train_tf_h200.py"
 CONFIG_PATH="config.json"
 GPUS=1
-MEMORY=40   # MINIMUM free VRAM (GB) a candidate GPU must have to be selected
-TIME=12
 
-# gpuq is daemonless: the job runs in the FOREGROUND in this terminal. There
-# are no per-job log files — redirect the output yourself if you want one.
+# The job waits its turn, then runs in this terminal. Run this script inside
+# tmux, or add --detach (the output then goes to ~/gpuq-logs/<id>.log).
 gpuq submit \
   --command "python $SCRIPT_PATH --config $CONFIG_PATH" \
-  --gpus $GPUS \
-  --memory $MEMORY \
-  --time $TIME
+  --gpus $GPUS
 
 echo "TensorFlow job finished. Check live status of other jobs with: gpuq status"
 ```

@@ -2,7 +2,7 @@
 
 Complete guide for optimizing JAX and Flax workflows on the Ruqola server's H200 GPUs.
 
-The Ruqola server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices `0,1,2,3`), each with ~141 GB of VRAM (~564 GB total), compute capability 9.0 (Hopper). The host runs Ubuntu 24.04 with GPU driver 575.57.08 and a CUDA 12.9 driver stack. Inside a gpuq job, `jax.devices()` lists only the cards gpuq gave you (at most 3 per user), so derive the count with `len(jax.devices())` instead of hard-coding it.
+The Ruqola server (host `wsserver1`, "Mjolnir") has **4 x NVIDIA H200 NVL** GPUs (indices `0,1,2,3`), each with ~141 GB of VRAM (~564 GB total), compute capability 9.0 (Hopper). The host runs Ubuntu 24.04 with GPU driver 575.57.08 and a CUDA 12.9 driver stack. Inside a gpuq job, `jax.devices()` lists only the cards gpuq gave you, so derive the count with `len(jax.devices())` instead of hard-coding it.
 
 ## Setup and Installation
 
@@ -22,7 +22,7 @@ pip install chex ml_collections wandb
 
 # Verify installation (through gpuq: JAX grabs 75% of every visible card unless told not to)
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-gpuq submit -m 2 -t 0.1 -- python -c "import jax; print('JAX version:', jax.__version__); print('Devices:', jax.devices())"
+gpuq submit -m 2 -- python -c "import jax; print('JAX version:', jax.__version__); print('Devices:', jax.devices())"
 ```
 
 The modern `jax[cuda12]` extra bundles the CUDA libraries as pip wheels, so the
@@ -38,7 +38,7 @@ export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 ```
 
 > Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs
-> it gave you. Overriding it runs the job on a card it was not given, and the audit kills it
+> it gave you. A job can reach only its own GPUs, so any other number finds no GPU
 > (see the [GPU Queue guide](gpu-queue-guide.md)).
 
 ### Verify Installation
@@ -201,7 +201,7 @@ os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
 # Pick ONE strategy — these two are mutually exclusive:
 #   * PREALLOCATE=false               -> grow memory on demand (polite default
-#                                        on a shared box; co-tenant jobs can be
+#                                        on a shared box; your other jobs can be
 #                                        stacked onto the same GPU by gpuq).
 #   * PREALLOCATE=true + MEM_FRACTION -> a single up-front preallocation capped
 #                                        at the given fraction of the card.
@@ -619,41 +619,36 @@ to pin intermediate values to a particular layout.
 
 ### Multi-GPU Job Submission
 
-`gpuq` is daemonless: `gpuq submit` runs your job in the **foreground** of the
-current terminal (its stdout/stderr stay in your terminal — redirect to a file
-yourself if you want a log). It does not write per-job log files.
+`gpuq submit` waits its turn, then runs your job in the current terminal (its
+stdout/stderr stay in your terminal). Run it inside tmux, or add `--detach`: it
+returns at once and the output goes to `~/gpuq-logs/<id>.log`.
 
 ```bash
-# Submit a multi-GPU JAX job on 3 H200 cards (the per-user maximum)
-# --gpus 3: 3 whole GPUs (the per-user cap). --memory 100: only cards with >= 100 GB free.
-# --time 16: the job is stopped after 16 hours.
+# Submit a multi-GPU JAX job on 3 H200 cards
+# --gpus 3: 3 whole GPUs, each one for this job alone.
 gpuq submit \
   --command "python train_jax_multi.py --num-devices=3 --model-parallel" \
-  --gpus 3 \
-  --memory 100 \
-  --time 16
+  --gpus 3
 ```
 
 A few things worth knowing about these flags (per `gpuq` itself):
 
-- `--gpus N` claims `N` whole GPUs chosen at random among the free cards. The
-  per-user cap on this host is **3 concurrent cards**, so `--gpus 4` is refused
-  at submit; use a smaller number for a partial run.
-- `--memory GB` is **not** a per-GPU reservation or a hard cap on your job — it
-  is the *minimum free VRAM a candidate GPU must have to be selected* (an
-  admission floor). `--memory 100` simply means "only schedule me on a GPU with
-  at least 100 GB free right now."
-- `--devices 0,1` pins exact cards (the count is taken from the list). Pinning
-  is rejected immediately if any listed GPU is held by another user, **unless**
-  you also pass `--queue`, in which case it waits until all of them are free or
-  already yours.
-- `--queue` waits and polls instead of exiting when no slot is free.
-- `--notify you@example.com` overrides the completion-notice address (by default
-  the address read from your account). There is no `--email` flag.
+- `--gpus N` claims `N` whole GPUs; gpuq picks which (all 4 are identical). A job
+  may ask for up to 4 (the whole host). A job needing 2+ GPUs is promised a start
+  time, and the first GPUs to free up are held for it.
+- Leave out `--memory` for a training run: without it each GPU is yours alone.
+  `--memory X` means "beside my own running job if X GB is free there, else a free
+  GPU" — for small tests and evaluations.
+- `--devices N` adds the job to your GPU `N`, which one of your jobs is running on
+  now. A GPU you have no job on is refused: use `--gpus` for new GPUs.
+- Every job may run 48 h. For a shorter limit, wrap the command:
+  `timeout 16h python ...`.
+- `--notify` also emails you when the job ends, at your account's address. There
+  is no `--email` flag.
 
 ```bash
-# Pin specific cards and wait for them if they are busy
-gpuq submit --devices 0,1 --queue -m 60 -- python train_jax_multi.py --num-devices=2
+# Two GPUs: gpuq picks which, and the job waits its turn until they are free
+gpuq submit -g 2 -- python train_jax_multi.py --num-devices=2
 ```
 
 ## Large Model Training
@@ -1058,7 +1053,7 @@ memory_thread = memory_monitor(interval=10)
 #!/usr/bin/env python3
 """
 H200-Optimized JAX/Flax Training Script
-Usage: gpuq submit --command "python train_jax_h200.py --config config.py" --gpus 1 --memory 100
+Usage: gpuq submit --command "python train_jax_h200.py --config config.py" --gpus 1
 """
 
 import jax

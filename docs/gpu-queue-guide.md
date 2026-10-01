@@ -1,19 +1,25 @@
 # GPU Queue (gpuq) Guide
 
-`gpuq` shares Mjölnir's 4 GPUs. Start every GPU job with `gpuq submit`. It picks
-free cards, sets `CUDA_VISIBLE_DEVICES`, and runs your command in your terminal
-until the command ends. GPU work started any other way is killed (see
-[Rules](#rules)).
+`gpuq` shares Mjölnir's 4 GPUs. Start every GPU job with `gpuq submit` (or
+`gpuq shell`). It waits for your turn, gives the job GPUs of its own, and runs
+your command as you, in your folder, with your environment. Start all GPU work
+through gpuq (see [Rules](#rules)).
 
 ## Quick start
 
 ```bash
-tmux new -s train                          # the job survives a dropped SSH session
-source ~/venvs/myenv/bin/activate          # gpuq runs your command in this environment
-gpuq submit -m 40 -t 8 -- python train.py  # 1 GPU with >= 40 GB free, stop after 8 h
+tmux new -s train                     # a job lives as long as its terminal
+source ~/venvs/myenv/bin/activate     # gpuq runs your command in this environment
+gpuq submit -- python train.py        # 1 GPU to itself, for up to 48 h
 ```
 
 Detach with `Ctrl-b d`. Come back with `tmux attach -t train`.
+
+Or let it run without a terminal, and read its output from a file:
+
+```bash
+gpuq submit --detach -- python train.py   # prints the job id; output in ~/gpuq-logs/<id>.log
+```
 
 The system has `python3` but no `python`; `python` exists inside a venv. To set
 one up, see [Best Practices](best-practices.md#set-up-once).
@@ -21,175 +27,189 @@ one up, see [Best Practices](best-practices.md#set-up-once).
 Everyday commands:
 
 ```bash
-gpuq status          # each GPU, running and queued jobs, your 7-day usage
-gpuq history         # how your recent jobs ended and what they cost
-gpuq quota           # your GPU-hours in the last 7 days against the budget
-gpuq kill 12345      # stop a running job or cancel a queued one (yours only)
+gpuq status          # each GPU, running jobs, and the queue in order
+gpuq why 12345       # why a job is waiting, and when it should start
+gpuq share           # your recent GPU use and your place in line
+gpuq history         # how your recent jobs ended
+gpuq kill 12345      # stop a running job or cancel a waiting one (yours only)
 gpuq kill --mine     # stop and cancel all of your jobs
-gpuq config          # the defaults in force (time limit, -m filter)
 gpuq submit -h       # every submit option
 ```
 
 ## Rules
 
-| Rule | Limit | What happens |
-|---|---|---|
-| Job time | 48 hours | gpuq stops the job at its `-t` limit. A `-t` above 48 is refused. |
-| Cards per user | 3 at once | gpuq never gives you a 4th card. Holding 3 alerts the admin, so use 2 unless you need 3. |
-| GPU-hours | 168 per rolling 7 days | Over budget, a new job waits 15 minutes, then runs at low priority. It is never refused. |
-| GPU work outside gpuq | not allowed | You get a warning email. The process is killed at the first audit 15 minutes or more after the warning. |
+| Rule | What happens |
+|---|---|
+| Job time: 48 hours | Every job may run 48 h. Then it is stopped: SIGTERM, then SIGKILL 10 s later. You get an email 1 hour before. |
+| Who goes first | When more people want GPUs than there are, whoever has used the fewest GPU-hours lately goes first. Use fades by half every 7 days. |
+| Jobs needing 2+ GPUs | get a promised start time, and the first GPUs to free up are held for them. A promise only moves earlier. |
+| Your GPU is yours | While your job runs on a GPU, nobody else's job is put on it. You may add more of your own jobs ([Sharing your own GPU](#sharing-your-own-gpu)). |
+| GPU work outside gpuq | Not allowed. gpuq records it, and will stop it automatically in a later step. |
 
-- A root audit, `gpuq audit --enforce`, runs every 15 minutes. It finds GPU
-  processes that gpuq did not start, and gpuq jobs running on a card they were
-  not given (a "rebind"). Each gets a warning email and is killed at the first
-  audit 15 minutes or more later. Reminders go out every 2 hours, so in practice
-  you see the warning and then the kill.
-- This covers everything: a notebook kernel, a quick `python3 -c` test, an IDE
-  session. Start them through gpuq ([examples](#interactive-work-and-notebooks)).
-- A card held by another user is never given to you. You may stack more of your
-  own jobs on cards you already hold.
+- There is no weekly quota and no limit on GPUs per person. Fair-share keeps it
+  fair: the more you have used lately, the later your turn when others wait.
+- What counts as use: GPU-hours **held**. A GPU counts once, however many of
+  your jobs share it.
+- "All GPU work" means everything: a notebook kernel, a quick `python3 -c`
+  test, an IDE session. Use `gpuq shell` for interactive work
+  ([Background jobs and shells](#background-jobs-and-shells)).
+- A job can only reach its own GPUs. The other GPUs do not exist for it.
 
 ## Submitting a job
 
 Put your command after `--`. gpuq runs it directly, with no shell.
 
 ```bash
-gpuq submit -g 2 -m 60 -t 12 -- torchrun --nproc_per_node=2 train.py
+gpuq submit -g 2 -- torchrun --nproc_per_node=2 train.py
 ```
 
 | Option | Meaning | Default |
 |---|---|---|
 | `-g N`, `--gpus N` | number of whole GPUs | 1 |
-| `-m GB`, `--memory GB` | only use a card with at least this much free VRAM. A filter, not a reservation: the job may use more. | 120 |
-| `-t H`, `--time H` | stop the job after H hours. Must be above 0 and at most 48. Decimals work: `-t 0.5`. | 48 |
-| `--devices 1,3` | use exactly these GPU indices. Sets the GPU count. | |
-| `--queue` | wait for a slot instead of failing | off |
+| `-m GB`, `--memory GB` | the VRAM you need. With it, the job may run beside your own running job where that much is free ([Sharing your own GPU](#sharing-your-own-gpu)) | none: a GPU to itself |
+| `--devices N` | add the job to your own GPU N, which one of your jobs is running on ([Sharing your own GPU](#sharing-your-own-gpu)) | |
+| `--detach` | return at once; output goes to `~/gpuq-logs/<id>.log` | off |
 | `--name TEXT` | label shown in `gpuq status` and `gpuq history` | |
-| `--notify EMAIL` | send the end-of-job email here instead of to your account's address | |
+| `--notify` | email you when the job ends | off |
 | `--command "..."` | the command as one string, instead of after `--` | |
+| `-t H`, `--queue` | accepted so old scripts still run, and ignored | |
 
-**Always pass `-m`.** The default filter is 120 GB, and a card someone else
-has been using rarely has that much free. Ask for what your job needs.
-`gpuq config` shows the filter in force as `min_free_vram_filter`.
+**Leave out `-m` for a normal run.** Without it, the job gets a GPU to itself.
+With `-m`, gpuq first puts the job beside a job of yours that is already
+running, if that GPU has room, and the two share its compute.
 
-**Pass a realistic `-t`.** It is the kill timer, and the quota check counts it
-in advance: a 1-GPU job with the default 48 h counts as 48 GPU-hours at submit.
+**There is no time limit flag.** Every job may run 48 h. For a shorter limit,
+wrap the command: `gpuq submit -- timeout 4h python train.py`. For longer work,
+save checkpoints and resubmit. Inside the job, `GPUQ_DEADLINE` holds the stop
+time (epoch seconds).
 
 **There is no shell.** `&&`, `|`, `>`, `cd`, and `VAR=value` prefixes reach your
 program as plain arguments. Wrap them in `bash -c`:
 
 ```bash
-gpuq submit -m 40 -- bash -c "cd ~/proj && python train.py > run.log 2>&1"
+gpuq submit -- bash -c "cd ~/proj && python train.py > run.log 2>&1"
 ```
 
 Use `bash -c`, not `bash -lc`. A login shell resets `PATH` on this host, which
 drops your venv. To set a variable, `export` it before you submit; gpuq passes
 your environment to the job.
 
-**Jobs longer than 48 hours** must save checkpoints and be resubmitted.
+**Waiting.** When no GPU is free for you, the job waits its turn and gpuq says
+where it stands, for example
+`[gpuq] job <id> queued: needs 1 card(s), 0 free. Estimate: ~Fri 16:34.`
+An estimate can move either way; a promise (2+ GPUs) only moves earlier.
+`gpuq why <id>` explains the wait. Ctrl-C cancels it.
 
-When the job starts, gpuq prints `[gpuq] job <id> starting on GPU(s) <list>`.
-The id is what `gpuq kill` and `gpuq history` use.
+When the job starts, gpuq prints `[gpuq] job <id> starting on GPU(s) <list>.`
+The id is what `gpuq kill`, `gpuq why` and `gpuq history` use.
 
-## Choosing Which GPU
+**Inside the job:**
 
-gpuq gives you two kinds of card:
+- `CUDA_VISIBLE_DEVICES` is `0`, `0,1`, …: `cuda:0` is your first GPU.
+- `GPUQ_GPUS` holds the host's numbers for your GPUs, as `gpuq status` and
+  `nvidia-smi` show them. `GPUQ_JOB_ID` is the job id.
+- `nvidia-smi` inside the job lists only your GPUs.
+- Do not set `CUDA_VISIBLE_DEVICES` yourself. Another number finds no GPU,
+  because the job cannot reach GPUs it was not given.
 
-- A **free** card: no gpuq job on it, utilization under 10%, and at least `-m`
-  GB free.
-- A card **you already hold**: one of your running jobs is on it. Another job
-  can stack there if the card has at least `-m` GB free (never less than 2 GB).
-  Utilization does not matter.
+**Exit code.** `gpuq submit` exits with the job's exit code. A job ended by a
+signal exits with 128 + the signal number: 143 for SIGTERM, which is what the
+48-hour stop and `gpuq kill` send first.
 
-`-g N` takes free cards first, chosen at random. It stacks on your own cards
-only when there are not enough free ones. Once you hold 3 cards, new jobs can
-only stack.
+## Sharing your own GPU
 
-`--devices` pins exact cards. Each must be free or already yours. If one is not,
-the submit fails at once and names the reason for each card. Add `--queue` to
-wait for them instead.
+A GPU your job is running on is yours, and you can add more of your own jobs
+to it: a quick test of an idea beside your training, an evaluation, a debugger.
+Adding them is never charged extra.
+
+| you type | where the job runs | waits its turn? | may run |
+|---|---|---|---|
+| neither flag | a GPU to itself | yes | 48 h |
+| `-m X` | beside a job of yours, on a GPU of yours with X GB free; if none has room, a free GPU | yes | 48 h |
+| `--devices N`, with or without `-m X` | your GPU N, and nowhere else | no | until your job(s) on GPU N reach their 48 h |
+
+`--devices` is the way to pick the GPU:
 
 ```bash
-gpuq submit -g 2 -m 40 -- python train.py               # 2 cards, free ones first
-gpuq submit --devices 0,2 -m 40 -- python train.py      # exactly GPUs 0 and 2
-gpuq submit --devices 1 --queue -m 40 -- python eval.py # wait for GPU 1
+gpuq status                                            # your training runs on GPU 2
+gpuq submit --devices 2 -m 10 -- python test_idea.py   # beside it, once 10 GB is free there
+gpuq shell --devices 2                                 # a shell on GPU 2, beside it
 ```
 
-To wait for a fresh card instead of stacking on your busy one, use `--queue` with
-an `-m` larger than your busy card has free.
+- It skips the queue: the job starts as soon as GPU 2 has the `-m` GB free,
+  and never with less than 2 GB free. Until then `gpuq status` lists it under
+  "joining their own card".
+- It must end when your job(s) on GPU 2 reach their 48 h. The start message
+  says when.
+- If your jobs on GPU 2 all end before there is room, it is cancelled.
+- `--devices` on a GPU you have no job on is refused. For new GPUs, use `-g N`:
+  all 4 GPUs are identical, so gpuq picks which.
+- Jobs sharing a GPU share its compute: each runs slower than it would alone.
 
-gpuq sets `CUDA_VISIBLE_DEVICES` for the job, so inside it your cards are
-numbered from 0: `cuda:0` is your first card. Do not set the variable again
-inside the job, for example `bash -c "CUDA_VISIBLE_DEVICES=0 python ..."`: that
-names physical GPU 0, which may not be yours. A job on a card it was not given
-is a rebind and is killed (see [Rules](#rules)). To choose a card, use
-`--devices`.
+## Background jobs and shells
 
-### Changing with gpuq v3: `--devices`
+**Attached (the default).** The job writes to your terminal and lives as long
+as the `gpuq submit` that started it. Closing the terminal, or a dropped SSH
+session, stops it. Run attached jobs inside `tmux` or `screen`; `nohup` does
+not help.
 
-gpuq is being rebuilt as v3. It is not live yet, and the switch will be
-announced. Until then, `--devices` works as described above. From the switch:
-
-- `--devices N` adds a job to **your own** card N: a GPU that one of your gpuq
-  jobs is running on. Use it for what you run beside your training: a quick
-  test of an idea, an evaluation, a debugger.
-- That job skips the queue. It starts once card N has the `-m` GB free, and
-  never with less than 2 GB free. The card is charged once, however many of
-  your jobs share it.
-- It must end when your job(s) on card N reach their 48 hours. If they end
-  before there is room for it, it is cancelled.
-- `--devices` on any other card is refused. For new cards, use `-g N`: all 4
-  cards are identical, so gpuq picks which.
+**Detached.** `gpuq submit --detach -- ...` returns at once and prints the job
+id. The job keeps running after you log out. Its output goes to
+`~/gpuq-logs/<id>.log`:
 
 ```bash
-gpuq submit --devices 2 -m 10 -- python test_idea.py   # beside your job on GPU 2
-gpuq shell --devices 2                                 # a shell on your GPU 2 (v3)
+gpuq submit --detach --name run1 -- python train.py
+tail -f ~/gpuq-logs/<id>.log       # follow it; Ctrl-C stops tail, not the job
+gpuq kill <id>                     # stop it
 ```
 
-**To be ready:** if a script uses `--devices` to pick a free card, change it to
-`-g`.
+**Interactive.** `gpuq shell` waits its turn like any job, then opens a shell on
+a GPU. Everything you start in it is part of the job. The job ends when you
+exit the shell. It takes `-g`, `-m` and `--devices`, and needs a terminal.
 
-## Keeping Jobs Alive After Logout
+Notebooks: inside tmux, run `gpuq shell`, then `jupyter lab --no-browser --port 8888`
+in that shell. Install `jupyter` in your venv first. From your own computer, open
+a tunnel with `ssh -N -L 8888:localhost:8888 <you>@<server>`, then browse to
+`http://localhost:8888`.
 
-A job lives only as long as the `gpuq submit` that started it. If the terminal
-closes or SSH drops, gpuq passes the hangup to the job and the job dies. Run
-jobs inside `tmux` or `screen`. `nohup` does not protect a gpuq job.
-
-## Monitoring and Management
+## Monitoring and history
 
 ```bash
-gpuq status                  # everything: GPUs, jobs, queue, all GPU processes
+gpuq status                  # GPUs, running jobs, the queue, GPU use outside gpuq
 watch -n 10 gpuq status      # refresh every 10 s
+gpuq why <id>                # why a job is waiting, and when it should start
+gpuq share --all             # everyone's recent use: least goes first
 nvidia-smi -l 1              # raw GPU usage, every second
 ```
 
-**Output.** The job's output goes to your terminal. gpuq writes no log files. To
-keep a copy:
+**Output.** An attached job writes to your terminal, a detached one to
+`~/gpuq-logs/<id>.log`. To keep a copy of an attached job's output:
 
 ```bash
-gpuq submit -m 40 -- python train.py 2>&1 | tee run.log
+gpuq submit -- python train.py 2>&1 | tee run.log
 ```
 
 When the job ends, gpuq prints one line such as
 `[gpuq] job <id> completed: ran 1:02:03 on GPU(s) 0, 1.03 GPU-hours recorded (exit 0).`
-and emails you (see [Notifications](notifications-faq.md)).
 
-**Stopping jobs.** `gpuq kill <id> [<id> ...]` stops your running jobs or
-cancels queued ones, from any terminal. `gpuq kill --mine` does all of yours.
-You cannot kill another user's job.
+**Email** goes to the address in your account details:
 
-**Exit code.** `gpuq submit` exits with the job's exit code. A job killed by a
-signal exits with 128 + the signal number: 143 for SIGTERM, which is what a
-time-limit stop sends first.
+- when a job that waited 10 minutes or more starts;
+- 1 hour before a job's 48-hour stop;
+- when a job ends, only if you passed `--notify`.
 
-## Job History
+**Stopping jobs.** `gpuq kill <id> [<id> ...]` stops your running jobs (SIGTERM,
+then SIGKILL 10 s later) or cancels waiting ones, from any terminal.
+`gpuq kill --mine` does all of yours. You cannot kill another user's job.
+
+**History.**
 
 ```bash
 gpuq history              # your last 20 jobs, oldest first
 gpuq history -n 50        # more (0 = all)
 gpuq history --all        # everyone's jobs
 gpuq history --user bob   # one user's jobs
-gpuq history --events     # also cancelled and rejected submits
+gpuq history --events     # also jobs that left the queue without running
 gpuq history --json       # raw records
 ```
 
@@ -199,80 +219,49 @@ The RESULT column says how each job ended:
 |---|---|
 | `completed` | exit code 0 |
 | `failed` | non-zero exit code |
-| `timed_out` | stopped at its `-t` limit |
+| `timed_out` | stopped at 48 h |
 | `killed` | ended by a signal: `gpuq kill`, Ctrl-C, or a closed terminal |
-| `lost*` | the `gpuq submit` process died; the job was charged until gpuq noticed, at most its `-t` |
+| `lost*` | gpuq lost track of the job (rare) |
 
-## GPU-Hour Quotas
-
-Each user has **168 GPU-hours per rolling 7 days**. That is one GPU running
-around the clock.
-
-- **What is charged:** runtime × number of cards, for every job. Stacked jobs are
-  charged separately: two 1-GPU jobs sharing one card cost 2 GPU-hours per hour.
-  Running jobs count as they go.
-- **The check at submit:** gpuq compares your usage plus `cards × -t` with 168.
-- **Over budget:** the job is not refused. gpuq prints and emails the time until
-  which it is held. It waits 15 minutes from submit, then queues at low priority:
-  it starts only when no normal-priority job waiting could take the slot. It
-  checks for a slot every 120 seconds.
-- `--devices` does not skip the check.
-
-```bash
-gpuq quota          # your finished + running GPU-hours, budget, status
-gpuq quota --all    # every user, and how full the host is
-```
-
-`gpuq quota` can say OK while a submit is still held, because the submit check
-adds `cards × -t`. Pass a realistic `-t`.
-
-## Common Workflows
+## Common workflows
 
 ### Multi-GPU training
 
 ```bash
-gpuq submit -g 2 -m 60 -t 12 -- torchrun --nproc_per_node=2 train.py
+gpuq submit -g 2 -- torchrun --nproc_per_node=2 train.py
 ```
 
-Keep `--nproc_per_node` equal to `-g`.
+Keep `--nproc_per_node` equal to `-g`. The job's GPUs talk over NVLink.
 
 ### A sweep
 
-Each `gpuq submit` holds its terminal, so give each run its own tmux session
-and let them wait with `--queue`. Activate the venv inside each session:
+Detached jobs need no tmux session each. Activate the venv first: each job
+takes the environment of the shell that submitted it.
 
 ```bash
+source ~/venvs/myenv/bin/activate
 for lr in 0.001 0.01 0.1; do
-  tmux new -d -s "lr$lr" "source ~/venvs/myenv/bin/activate && gpuq submit -m 30 -t 4 --queue --name lr$lr -- python train.py --lr $lr"
+  gpuq submit --detach --name lr$lr -- python train.py --lr $lr
 done
-gpuq kill --mine     # stops the whole sweep, running and queued
+gpuq status          # where each one stands
+gpuq kill --mine     # stops the whole sweep, running and waiting
 ```
-
-### Interactive work and notebooks
-
-```bash
-gpuq submit -m 20 -t 1 -- bash       # a shell on 1 GPU; everything you start in it is tracked
-gpuq submit -m 40 -t 4 -- jupyter lab --no-browser --port 8888   # inside tmux
-```
-
-Install `jupyter` in your venv first. From your own computer, open a tunnel with
-`ssh -N -L 8888:localhost:8888 <you>@<server>`, then browse to
-`http://localhost:8888`.
 
 ## Troubleshooting
 
 | You see | Cause and fix |
 |---|---|
-| `gpuq: no free GPU matches your request (need 1 GPU(s) with >= 120 GB free; ...)` | No card meets your `-m`. Pass a smaller `-m`, or add `--queue` to wait. |
-| `gpuq: requested GPU(s) not available — not submitting:` | A `--devices` card is held or too full; the next lines say why. Add `--queue`, or pick other cards. |
-| `Per-user card cap: you already hold GPU(s) [...] of the 3-card cap` | You hold 3 cards. The job can only stack on them. Wait for one of your jobs to end, or add `--queue`. |
-| `gpuq: this host caps each user at 3 concurrent GPU(s)` | `-g` above 3. Use 3 or fewer. |
-| `gpuq: -t/--time ...h exceeds the 48h (2-day) wall-time cap on wsserver1.` | Use `-t 48` or less; checkpoint and resubmit. |
-| `[gpuq] over quota: used ...` | Over 168 GPU-hours. The job waits 15 minutes, then runs at low priority. See [GPU-Hour Quotas](#gpu-hour-quotas). |
-| `[gpuq] no slot; queued as job <id> ..., polling every 30s.` | Normal with `--queue`: it starts when a card frees up. |
-| `[gpuq] job <id> reached its 8.0h time limit — sending SIGTERM (SIGKILL in 10s).` | The job hit `-t`. Resubmit with a larger `-t` (at most 48). |
+| `[gpuq] job <id> queued: needs 1 card(s), 0 free. ...` | Normal: no GPU is free for you yet. `gpuq why <id>` says why and when. |
+| `gpuq: --devices 2: you have no job running on GPU 2. ...` | `--devices` only adds a job to a GPU your own job runs on. For a new GPU, leave it out (`-g N` for N GPUs). |
+| `[gpuq] -t 8 is ignored: every job may run 48 h ...` | Just a note. For a shorter limit: `gpuq submit -- timeout 8h python ...`. |
+| `gpuq: this host has 4 GPU(s); you asked for 5.` | Ask for 4 or fewer. |
+| `gpuq: -m 200: the largest card here has 140 GB.` | Ask for what fits on one GPU. |
+| ``gpuq: gpuq shell needs a terminal; use `gpuq submit` for scripts.`` | Run `gpuq shell` from an interactive terminal (tmux is fine). |
+| `gpuq: cannot reach gpuqd at /run/gpuq/gpuqd.sock ...` | The queue service is down. Tell the admin. |
+| Job ended with RESULT `timed_out`, exit 143 | It hit 48 h. Save checkpoints and resubmit. |
+| CUDA finds no GPU, or "invalid device ordinal" | The job set `CUDA_VISIBLE_DEVICES`, or used `cuda:N` beyond what `-g` gave it. Use `cuda:0` … `cuda:<g-1>`. |
 | `python: command not found` | Activate your venv before `gpuq submit`, or use `bash -c`, not `bash -lc`. |
-| Job died, reason unknown | Run `gpuq history`. Read the RESULT and exit code, then your saved output. |
+| Job died, reason unknown | Run `gpuq history`. Read the RESULT and exit code, then your saved output (`~/gpuq-logs/<id>.log` for detached jobs). |
 
 More problems: [Troubleshooting](troubleshooting.md). For the admin, include
 the job id, the command, and the output you saved.

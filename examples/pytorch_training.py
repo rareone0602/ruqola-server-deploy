@@ -4,7 +4,7 @@ PyTorch Training Example for H200 GPUs
 Demonstrates best practices for efficient training on the Ruqola server.
 
 Usage:
-gpuq submit --command "python pytorch_training.py --config resnet_config.yaml" --gpus 1 --memory 40 --time 8
+gpuq submit --command "python pytorch_training.py --config resnet_config.yaml" --gpus 1
 
 Features:
 - Mixed precision training with AMP

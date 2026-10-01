@@ -40,7 +40,7 @@ for i in range(torch.cuda.device_count()):
     print(f"  Multiprocessors: {props.multi_processor_count}")
 ```
 
-Save it as `check_gpu.py` and run it through gpuq: `gpuq submit -m 2 -t 0.1 -- python check_gpu.py`.
+Save it as `check_gpu.py` and run it through gpuq: `gpuq submit -m 2 -- python check_gpu.py`.
 You see only the GPUs gpuq gave you, numbered from 0, each with ~140 GB and compute capability 9.0.
 
 ### Environment Setup
@@ -53,7 +53,7 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 ```
 
 > Do **not** set `CUDA_VISIBLE_DEVICES`, in `~/.bashrc` or in the job. gpuq sets it to the GPUs
-> it gave you. Overriding it runs the job on a card it was not given, and the audit kills it
+> it gave you. A job can reach only its own GPUs, so any other number finds no GPU
 > (see the [GPU Queue guide](gpu-queue-guide.md)).
 
 ## Basic GPU Usage
@@ -382,37 +382,34 @@ def train_ddp(rank, world_size):
 
 # Launch with torchrun; --nproc_per_node must equal the number of GPUs you were
 # allocated (gpuq sets CUDA_VISIBLE_DEVICES for you) and match the --gpus value you
-# passed to `gpuq submit`. Max 3 per user on this server (the concurrent-card cap).
+# passed to `gpuq submit`. Up to 4 (the whole host).
 # torchrun --nproc_per_node=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .) train_script.py
-# (or just set it to your --gpus value, e.g. --nproc_per_node=3 at the cap)
+# (or just set it to your --gpus value, e.g. --nproc_per_node=4 for all four)
 ```
 
 ### GPU Queue Multi-GPU Job
 
 ```bash
-# Submit a multi-GPU job. gpuq runs it in the FOREGROUND in this terminal until it
-# finishes; there is no daemon and no per-job log files — redirect output yourself if
-# you want a log (e.g. append `> run.log 2>&1`).
+# Submit a multi-GPU job. gpuq waits its turn, then runs it in this terminal until it
+# finishes. Run it inside tmux, or add --detach to return at once (the output then
+# goes to ~/gpuq-logs/<id>.log).
 gpuq submit \
   --command "torchrun --nproc_per_node=2 train_distributed.py" \
-  --gpus 2 \
-  --memory 60 \
-  --time 12
+  --gpus 2
 
-# The largest single job possible: 3 GPUs (the per-user card cap; -g 4 is
-# rejected at submit, and holding 3 already triggers the admin warning):
+# The largest single job possible: all 4 GPUs (the whole host). A job needing
+# 2+ GPUs is promised a start time, and the first GPUs to free up are held for it:
 gpuq submit \
-  --command "torchrun --nproc_per_node=3 train_distributed.py" \
-  --gpus 3 \
-  --memory 60 \
-  --time 12
+  --command "torchrun --nproc_per_node=4 train_distributed.py" \
+  --gpus 4
 ```
 
-> `-m/--memory` is the **minimum free VRAM** (in GB) a GPU must have to be selected for your
-> job — an admission requirement, not a hard cap your job is held to. gpuq sets
+> Leave out `-m/--memory` for a training run: without it each GPU is yours alone. `-m X` means
+> "beside my own running job if X GB is free there, else a free GPU" (see
+> [Sharing your own GPU](gpu-queue-guide.md#sharing-your-own-gpu)). gpuq sets
 > `CUDA_VISIBLE_DEVICES` to the GPUs it picks, so keep `--nproc_per_node` equal to your `--gpus`
-> count. You own the GPUs you are allocated: you may stack more of your own jobs on them, but GPUs
-> held by other users are off-limits until they free them.
+> count. You own the GPUs you are allocated: nobody else's job is put on them, and you may add
+> more of your own jobs with `-m` or `--devices`.
 
 ## Large Model Training
 
@@ -708,7 +705,7 @@ except RuntimeError as e:
 #!/usr/bin/env python3
 """
 H200-Optimized PyTorch Training Script
-Usage: gpuq submit --command "python train_h200.py --config config.yaml" --gpus 1 --memory 60
+Usage: gpuq submit --command "python train_h200.py --config config.yaml" --gpus 1
 """
 
 import torch
@@ -887,18 +884,14 @@ logging:
 SCRIPT_PATH="train_h200.py"
 CONFIG_PATH="config.yaml"
 GPUS=1
-MEMORY=60  # GB minimum free VRAM a candidate GPU must have
-TIME=12    # hours
 
-# Submit the job. gpuq runs it in the FOREGROUND in this terminal until it finishes;
-# there is no daemon and no per-job log files — redirect output yourself if you want a log.
-# gpuq notifies you on completion at the email read from your account; --notify only overrides it.
+# Submit the job. gpuq waits its turn, then runs it in this terminal until it finishes.
+# Run this script inside tmux, or add --detach (the output then goes to ~/gpuq-logs/<id>.log).
+# --notify emails you when the job ends, at your account's address.
 gpuq submit \
   --command "python $SCRIPT_PATH --config $CONFIG_PATH" \
   --gpus $GPUS \
-  --memory $MEMORY \
-  --time $TIME \
-  --notify "your-email@example.com"
+  --notify
 
 echo "Job finished! Check current state any time with: gpuq status"
 ```

@@ -17,7 +17,7 @@ A quick reference for the live Ruqola server (host `wsserver1`, the NTU "Mjolnir
 | **System RAM** | 755 GiB |
 | **Operating system** | Ubuntu 24.04.4 LTS |
 
-> gpuq gives one user at most **3** of the 4 cards at a time. All 4 cards are linked to each other by NVLink (`nvidia-smi topo -m` shows `NV6` for every pair).
+> A gpuq job may ask for all **4** cards (`gpuq submit -g 4`). All 4 cards are linked to each other by NVLink (`nvidia-smi topo -m` shows `NV6` for every pair).
 
 ## Hardware Specifications
 
@@ -344,7 +344,7 @@ dataloader = torch.utils.data.DataLoader(
 # Sizes are approximate fp16 weight footprints; TRAINING needs much more
 # (optimizer state + activations), so treat these as inference/loading guides.
 models_by_memory = {
-    "GPT-3 175B": "~350 GB",          # Needs multi-GPU model parallelism (3 cards = ~423 GB, the per-user max)
+    "GPT-3 175B": "~350 GB",          # Needs multi-GPU model parallelism (3 cards = ~423 GB)
     "LLaMA 65B": "~130 GB fp16",      # Tight on one ~141 GB card for inference; no room to train
     "Stable Diffusion XL": "~12 GB",  # Much headroom for batch size
     "BERT Large": "~1.3 GB",          # Can run huge batch sizes
@@ -360,11 +360,10 @@ models_by_memory = {
    # A 70B model in fp16 is ~140 GB of weights ALONE, which does not leave
    # room on one ~141 GB card for activations/optimizer state. For ~70B:
    #   - inference: shard across multiple cards, or use 4-bit/8-bit quantization
-   #   - training/finetuning: multi-GPU (up to 3 cards per user here) and/or quantization+offload
+   #   - training/finetuning: multi-GPU (up to all 4 cards here) and/or quantization+offload
    from transformers import AutoModelForCausalLM
 
-   # Multi-GPU inference example (shards across the cards gpuq allocated you,
-   # up to the 3-card per-user cap):
+   # Multi-GPU inference example (shards across the cards gpuq allocated you):
    model = AutoModelForCausalLM.from_pretrained(
        "meta-llama/Llama-2-70b-hf",
        torch_dtype=torch.float16,
@@ -382,7 +381,7 @@ models_by_memory = {
 3. **Scientific Computing**:
    ```python
    # Large-scale numerical simulations (size grids to fit one card's ~141 GB,
-   # or shard across several cards, up to 3 per user, for bigger problems)
+   # or shard across several cards, up to all 4, for bigger problems)
    simulation_grid = torch.zeros(4096, 4096, 1024, device='cuda')
    ```
 

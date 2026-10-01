@@ -4,7 +4,7 @@ JAX/Flax Training Example for H200 GPUs
 Demonstrates best practices for efficient JAX training on the Ruqola server.
 
 Usage:
-gpuq submit --command "python jax_training.py --config jax_config.py" --gpus 1 --memory 60 --time 8
+gpuq submit --command "python jax_training.py --config jax_config.py" --gpus 1
 
 Features:
 - Pure functional programming with JAX

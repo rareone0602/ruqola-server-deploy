@@ -12,15 +12,16 @@ How to use the **Ruqola project** compute servers:
 
 ```bash
 gpuq status                                  # GPUs, jobs, queue
-gpuq submit -m 40 -t 8 -- python train.py    # 1 GPU with >= 40 GB free, 8 h limit
+gpuq submit -- python train.py               # 1 GPU to itself, up to 48 h
+gpuq submit --detach -- python train.py      # keeps running after you log out
+gpuq why 12345                               # why a job is waiting
 gpuq history                                 # how your recent jobs ended
-gpuq quota                                   # your 7-day GPU-hours against the budget
 gpuq kill --mine                             # stop and cancel all your jobs
 nvidia-smi -l 1                              # live GPU usage
 ```
 
-Run jobs inside `tmux`, from an activated venv. gpuq emails you when a job
-ends. The [GPU Queue guide](docs/gpu-queue-guide.md) has the rules and options.
+Run jobs from an activated venv, inside `tmux` or with `--detach`. The
+[GPU Queue guide](docs/gpu-queue-guide.md) has the rules and options.
 
 ## How the site works
 
@@ -43,7 +44,7 @@ index.html     the docs viewer
 .nojekyll      serve raw .md files
 assets/        app.js (tabs, router, rendering; MANIFEST), style.css, vendor/ (marked, highlight.js)
 docs/          the documentation pages
-gpuq/          the gpuq queue: userspace.py, installers, tests, README, sample config
+gpuq/          the gpuq Reference page (README.md); the rest is the gpuq before 2026-10-01
 examples/      runnable training examples and configs
 scripts/       admin scripts: accounts, disk quotas, scratch cleanup (see scripts/README.md)
 ```
