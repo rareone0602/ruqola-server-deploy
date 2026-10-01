@@ -44,4 +44,9 @@ check "writable /scratch paths = the reaper's SCRATCH_DIRS" "$rw_scratch" "$dirs
 check "neither /scratch nor /scratch/datasets is writable" "$(grep -cE '^/scratch(/datasets)?$' <<<"${rw_scratch// /$'\n'}")" "0"
 check "ProtectSystem=strict makes everything else read-only" "$(unit_value ProtectSystem)" "strict"
 
+t "A long night is never cut short (E18)"
+# A kill mid-deletion skips that night's mail. Written out, not left to the
+# default, so the choice is visible in the unit.
+check "TimeoutStartSec=infinity" "$(unit_value TimeoutStartSec)" "infinity"
+
 finish

@@ -33,5 +33,9 @@ ProtectControlGroups=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 
-TimeoutStartSec=3600
+# No time limit (todo E18): deleting one ~4.8-million-file cohort is estimated at
+# ~40 min, and a run killed mid-deletion sends no mail that night. The cost: the
+# timer cannot start a run while one is active, so a stuck run blocks every later
+# night. It shows as "activating" in: systemctl status scratch-cleanup
+TimeoutStartSec=infinity
 TimeoutStopSec=300
