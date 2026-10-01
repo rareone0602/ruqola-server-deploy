@@ -39,10 +39,8 @@ repo. This version (v3) has been live since 2026-10-01 20:33.
 | `/var/lib/gpuq/usage.jsonl` | the [job ledger](#job-ledger) (`0644`) |
 | `/var/lib/gpuq/exits/` | exit reports from the exit hook (root only) |
 | `/var/lib/gpuq/launch/` | each job's command, environment and folder, readable only by its user |
-| `/var/lib/gpuq/legacy.json` | the previous gpuq's jobs at cutover (root only) |
 | `/etc/gpuq/mail.json` | SMTP settings, with the password (root only) |
 | `/usr/local/lib/gpuq-v3/` | the code: `scheduler/`, `gpuqd/`, `gpuqcli/` |
-| `/usr/local/lib/gpuq-v2/gpuq` | the previous client, for `--rollback` (removed by `--retire`) |
 
 **Logs:** `journalctl -u gpuqd` has every submit, start, end and cancel, and
 every GPU process stopped outside gpuq. It needs `sudo` or the `systemd-journal`
@@ -71,31 +69,23 @@ group.
 `gpuq status` shows the queue in the order GPUs go out, with promised and
 estimated start times. `gpuq why <id>` explains one job's wait.
 
-## Install, update, roll back
+## Install and update
 
 Run from a gpuq checkout:
 
 ```bash
-sudo ./install_v3.sh              # first run: cut over; later runs: update
-sudo ./install_v3.sh --rollback   # back to the previous gpuq; refused while gpuqd has jobs
-sudo ./install_v3.sh --retire     # after the previous gpuq's last jobs end (see below)
+sudo ./install_v3.sh
 ```
 
-- **Update** installs the code and the client and restarts gpuqd. Running jobs
-  carry on.
-- **The cutover** (done 2026-10-01) refused while anyone waited in the previous
-  queue, wrote `/etc/gpuq/mail.json` from the previous config, swapped
-  `/usr/local/bin/gpuq`, and copied the previous ledger. The previous gpuq's
-  running jobs kept their GPUs until they ended. Their end records were copied
-  over.
-- **`--retire`** refuses while any of those jobs runs. Then it archives
-  `/var/lib/gpu_queue`, `/usr/local/bin/gpu_queue_config.json` (which holds the
-  mail password and is readable by members) and `/usr/local/lib/gpuq-v2` into a
-  root-only tarball in `/var/backups`, and removes them. After it, `--rollback`
-  is no longer possible.
-- **Leftovers to remove after `--retire`:** root's cron line
-  `*/15 * * * * /usr/local/bin/gpuq audit --enforce --quiet`, which does nothing
-  now, and the disabled `gpu-queue.service` of the retired root daemon.
+It installs the code and the client, then restarts gpuqd. Running jobs carry on.
+A compile error installs nothing. Mail needs `/etc/gpuq/mail.json` (root only;
+the format is in `gpuqd/mail.py`). Without it, gpuq sends no email.
+
+**History.** v3 replaced the previous gpuq on 2026-10-01 at 20:33. That gpuq's
+last jobs ran to their end, and it was retired the same day. Its state, config
+and client are in a root-only tarball, `/var/backups/gpuq-v2-*.tar.gz`. Its code,
+and the shadow mode that compared v3 against it, are in this repo's history up
+to commit `e64cbca`.
 
 **Before a risky change, run the root smoke check** from the gpuq checkout. It
 runs real units through gpuqd's own runner on two idle GPUs, with its state in a
@@ -211,7 +201,7 @@ server never stalls the queue.
 ## Local development
 
 ```bash
-python3 -m pytest tests/ -q       # from the gpuq repo root; about 3 minutes
+python3 -m pytest tests/ -q       # from the gpuq repo root; about a minute
 ```
 
 The suite is hermetic. `tests/daemon_world.py` fakes the host for gpuqd: 4 H200s
@@ -227,7 +217,3 @@ at a test setup:
 | `GPUQD_STATE_DIR` | `/var/lib/gpuq` | state and ledger |
 | `GPUQ_NVSMI` | `nvidia-smi` | the `nvidia-smi` to run |
 | `GPUQD_LIB` | `/usr/local/lib/gpuq-v3` | where a job's launcher and exit hook live |
-
-The previous gpuq's code (`userspace.py`, `install_system.sh`,
-`install_user.sh`) and its tests are still in the repo, but no longer installed.
-`--rollback` uses the copy in `/usr/local/lib/gpuq-v2`.

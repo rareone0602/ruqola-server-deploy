@@ -3,8 +3,7 @@ gpuqd job is holding.
 
 A process belongs to gpuqd job ID exactly when its cgroup is
 /gpuq.slice/gpuq-job-ID.service: gpuqd creates that cgroup before the job runs
-its first instruction (§6). A process of a job the previous gpuq was running at
-cutover is recognised by that gpuq's rules (legacy.owner_of).
+its first instruction (§6).
 
 Any other GPU process of a person (uid >= 1000) is outside every job. Rule 4
 stops it about a minute after it is first seen (stopper.py). Until it is gone,
@@ -15,7 +14,6 @@ from dataclasses import dataclass, field
 
 from scheduler.model import MAX_RUNTIME_H, Job, Running
 
-from . import legacy
 from .procinfo import read_proc
 from .untracked import SYSTEM_UID_MAX, offenders
 
@@ -51,9 +49,8 @@ class Holders:
         except KeyError:
             return str(uid)
 
-    def read(self, now, procs, jobs, legacy_entries):
-        """procs: nvsmi.read_procs(). jobs: gpuqd's running jobs by id.
-        legacy_entries: the previous gpuq's jobs still running from cutover."""
+    def read(self, now, procs, jobs):
+        """procs: nvsmi.read_procs(). jobs: gpuqd's running jobs by id."""
         pic = Picture()
         seen, held = [], {}
         for p in procs:
@@ -67,10 +64,6 @@ class Holders:
                 if p.card is not None:
                     by_card = pic.job_mb.setdefault(jid, {})
                     by_card[p.card] = by_card.get(p.card, 0) + p.used_mb
-            elif legacy_entries:
-                e = legacy.owner_of(info, legacy_entries, self.proc)
-                if e is not None:
-                    owner = (str(e["id"]), tuple(int(c) for c in e.get("gpus") or ()))
             seen.append((p, info, owner))
             if owner is None and info.uid > SYSTEM_UID_MAX and p.card is not None:
                 key = (self._name(info.uid), p.card)

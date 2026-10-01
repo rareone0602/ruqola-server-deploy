@@ -3,7 +3,7 @@
 A process is an offender when no gpuq job owns it, or when its job owns it but
 it is on a card the job was not given. Accounts below uid 1000 (the display
 server, driver daemons) are exempt. Who owns a process is the caller's
-question: the previous gpuq's rules in shadow mode, the job's own cgroup after cutover.
+question: holders.py answers it from the process's cgroup.
 """
 import pwd
 from dataclasses import dataclass

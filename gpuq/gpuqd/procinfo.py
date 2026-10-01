@@ -1,6 +1,4 @@
-"""One process as /proc describes it. Everything read here is world-readable,
-so the shadow daemon needs no privilege to see other accounts' processes.
-"""
+"""One process as /proc describes it. Everything read here is world-readable."""
 from dataclasses import dataclass
 
 

@@ -6,7 +6,7 @@
 QUOTA_SOFT="90G"     # Soft limit (warning)
 QUOTA_HARD="100G"     # Hard limit (enforced)
 DEFAULT_SHELL="/bin/bash"
-USER_GROUPS="users,scratch-users,gpuqueue"  # Standard research user groups
+USER_GROUPS="users,scratch-users"  # Standard research user groups
 LOG_FILE="/var/log/user_creation.log"
 ADMIN_EMAIL="mjolnirruqola@gmail.com"
 DOCS_URL="https://ighina.github.io/ruqola-server-deploy/"

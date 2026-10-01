@@ -2,7 +2,6 @@
 no lock, no group-writable file, and no path a member can plant (todo E1, E4).
 
   state.json      the queue and the running jobs, with their environments (0600)
-  legacy.json     the previous gpuq's running.json at cutover, from install_v3.sh (transition.py)
   usage.jsonl     the ledger: the v2 format, readable by all (0644)
   exits/ID.json   how a job ended, written by its unit's exit hook (dir 0700)
   launch/ID.json  what a starting job runs, readable only by its owner (dir 0711)
@@ -52,10 +51,10 @@ class Store:
                 data = json.load(f)
         except FileNotFoundError:
             data = {}
-        return {k: list(data.get(k) or []) for k in ("jobs", "promised", "legacy_done")}
+        return {k: list(data.get(k) or []) for k in ("jobs", "promised")}
 
-    def save(self, jobs, promised, legacy_done=()):
-        data = {"jobs": jobs, "promised": list(promised), "legacy_done": list(legacy_done)}
+    def save(self, jobs, promised):
+        data = {"jobs": jobs, "promised": list(promised)}
         _write_atomic(self.state, json.dumps(data), 0o600)
 
     # -- ledger -------------------------------------------------------------------

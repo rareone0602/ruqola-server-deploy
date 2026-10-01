@@ -46,15 +46,12 @@ def cmd_status(args):
             mem = f"{c['used_mb'] / 1024:.0f}/{c['total_mb'] / 1024:.0f} GB"
             print(f"{c['index']:<4} {', '.join(holders) or '-':<16} "
                   f"{when(c['free_by'], now):<12} {mem:<11} {nxt}")
-    print(f"\nrunning ({len(s['running']) + len(s.get('old') or ())})")
+    print(f"\nrunning ({len(s['running'])})")
     for r in s["running"]:
         label = f"{r['name']}: " if r.get("name") else ""
         print(f"  {r['job']:<11} {r['user']:<10} GPU {','.join(map(str, r['cards'])):<6} "
               f"ran {_run_for(now - r['started']):>6}  until {when(r['deadline'], now):<10} "
               f"{_trunc(label + r['command'], 50)}")
-    for o in s.get("old") or ():
-        print(f"  {o['job']:<11} {o['user']:<10} GPU {','.join(map(str, o['cards'] or ())):<6} "
-              f"started by the old gpuq at {o['started']}")
     print(f"\nqueue, in the order cards go out ({len(s['queue'])})")
     for n, q in enumerate(s["queue"], 1):
         if q["kind"] == "promise":

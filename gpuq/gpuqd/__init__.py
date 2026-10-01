@@ -1,1 +1,1 @@
-"""gpuqd: the v3 daemon. For now only its shadow mode runs (docs/v3-design.md §10)."""
+"""gpuqd: the GPU queue's daemon (docs/v3-design.md §7)."""

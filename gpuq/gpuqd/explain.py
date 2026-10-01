@@ -28,7 +28,6 @@ class View:
     usage: dict = field(default_factory=dict)
     plan: object = None
     queue: list = field(default_factory=list)       # scheduler Jobs planned this pass
-    old: list = field(default_factory=list)         # jobs the previous gpuq started, still running
     untracked: list = field(default_factory=list)   # (user, card, used_mb, since, pids)
     held: list = field(default_factory=list)        # every holding, as scheduler Running
 
@@ -118,14 +117,6 @@ def _holders(view, jobs):
         if j["state"] == "running":
             for c in j["cards"]:
                 out.setdefault(c, []).append((j["user"], f"job {j['id']}", j["deadline"]))
-    for e in view.old:
-        try:
-            start = datetime.fromisoformat(e["started_at"]).timestamp()
-        except (KeyError, TypeError, ValueError):
-            start = view.t
-        for c in e.get("gpus") or ():
-            out.setdefault(int(c), []).append(
-                (e.get("user"), f"job {e.get('id')} (old gpuq)", start + MAX_RUNTIME_H * HOUR))
     for user, card, _mb, _since, _pids in view.untracked:
         out.setdefault(card, []).append((user, "outside gpuq", None))     # no deadline
     return out
@@ -169,8 +160,6 @@ def snapshot(view, jobs, host, orphans=()):
     return {"host": host, "t": view.t, "driver": True, "cards": cards,
             "running": _running(jobs), "queue": queue, "joining": joins,
             "waiting_for_client": held_back,
-            "old": [{"job": e.get("id"), "user": e.get("user"), "name": e.get("name"),
-                     "cards": e.get("gpus"), "started": e.get("started_at")} for e in view.old],
             "untracked": [{"user": u, "card": c, "used_mb": mb, "since": s, "pids": p}
                           for u, c, mb, s, p in view.untracked]}
 

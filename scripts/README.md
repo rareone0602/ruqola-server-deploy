@@ -35,7 +35,7 @@ scripts/
 | `/usr/local/bin/scratch-usage.sh`, `scratch-status` | `bin/` | anyone | | any user |
 | `/scratch/README.txt` | `tools/render-readme.sh` | generated at install | | |
 
-**Not managed here, on purpose:** `gpuq` (its own repo and `install_system.sh`),
+**Not managed here, on purpose:** `gpuq` (its own repo and `install_v3.sh`),
 `ollama` (upstream binary and unit), `nsys` (NVIDIA alternatives), `uv` (root's own).
 The manifest also names what must *not* exist: `scratch-backup.sh`, which was
 never a backup but a stale copy of the 30-day cleaner with `/scratch/datasets` in

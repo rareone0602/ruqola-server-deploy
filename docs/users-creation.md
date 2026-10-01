@@ -20,8 +20,8 @@ visible to other users in `ps` while the script runs.
 
 For each user, the script:
 
-- creates the account with `bash` as its shell, in the groups `users`,
-  `scratch-users` and `gpuqueue`
+- creates the account with `bash` as its shell, in the groups `users` and
+  `scratch-users`
 - sets the password and forces a change at first login
 - stores the email address in the account's GECOS field, where gpuq and the
   cleanup scripts look for it

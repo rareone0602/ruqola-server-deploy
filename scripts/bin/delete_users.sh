@@ -7,7 +7,7 @@ LOG_FILE="/var/log/user_deletion.log"
 BACKUP_DIR="/var/backups/deleted_users"
 HOME_BASE="/home"
 SCRATCH_BASE="/scratch/users"
-USER_GROUPS="users,scratch-users,gpuqueue"  # Standard research user groups
+USER_GROUPS="users,scratch-users"  # Standard research user groups
 
 # Accounts this script never deletes: uids outside the range useradd gives people
 # (UID_MIN..UID_MAX in /etc/login.defs; nobody is 65534), and admins. To delete a

@@ -18,7 +18,7 @@ import sys
 from scheduler.model import HOUR, MAX_RUNTIME_H
 from scheduler.planner import plan
 
-from . import explain, legacy
+from . import explain
 from .devices import device_minors
 from .history import Ledger, usage
 from .holders import Holders
@@ -28,7 +28,6 @@ from .procinfo import read_limits, read_umask
 from .runner import STOP_GRACE_S, StartError
 from .sightings import Sightings
 from .stopper import Stopper
-from .transition import LEGACY_DIR, Transition
 
 PASS_S = 30.0
 # Passes asked for by submits and job ends run at most this often.
@@ -75,8 +74,7 @@ def _str_dict(v):
 
 class Daemon:
     def __init__(self, store, runner, mailer, *, host=None, nvsmi=None, proc="/proc",
-                 legacy_dir=LEGACY_DIR, minors=device_minors, users=None, log=None,
-                 stopper=None):
+                 minors=device_minors, users=None, log=None, stopper=None):
         self.store = store
         self.runner = runner
         self.mailer = mailer
@@ -103,7 +101,6 @@ class Daemon:
         self.reported = set()
         self.stopper = stopper or Stopper(proc, self.log, mailer, self.host,
                                           self.holders._name)
-        self.transition = Transition(store.root / "legacy.json", legacy_dir, self.host, proc)
         self.driver_down = False
 
     # -- state --------------------------------------------------------------------
@@ -117,12 +114,10 @@ class Daemon:
             if job["mode"] != "detached":
                 self.orphans[int(job["id"])] = now + REATTACH_S
         self.promised = tuple(data["promised"])
-        self.transition.done = set(data.get("legacy_done") or ())
         self.want_pass = True
 
     def save(self):
-        self.store.save(list(self.jobs.values()), self.promised,
-                        legacy_done=sorted(self.transition.done))
+        self.store.save(list(self.jobs.values()), self.promised)
 
     def tell(self, job_id, msg):
         conn = self.clients.get(job_id)
@@ -227,13 +222,9 @@ class Daemon:
 
     def _holds(self, user):
         """card -> when `user`'s hold on it ends: the latest deadline of their
-        gpuq jobs running there, the previous gpuq's jobs at cutover included."""
+        gpuq jobs running there."""
         held = [(j["cards"], j["deadline"]) for j in self.jobs.values()
                 if j["state"] == "running" and j["user"] == user]
-        for e in self.transition.running():
-            r = legacy.as_running(e, 0.0)
-            if r is not None and r.job.user == user:
-                held.append((r.cards, r.end_by))
         out = {}
         for cards, end in held:
             for c in cards:
@@ -407,13 +398,6 @@ class Daemon:
         self.last_pass = now
         self.want_pass = False
         self.reap(now)
-        for rec in self.transition.ended(now):
-            self.store.append_ledger(rec)
-            self.log(f"end {rec['id']} {rec['user']} (started by the previous gpuq): "
-                     f"{rec.get('end_reason')}")
-        for kind, e in self.transition.strays():
-            self.log(f"the previous gpuq's {kind} list has job {e.get('id')} of {e.get('user')}: "
-                     "an old copy of gpuq is still in use; gpuqd does not honour it")
         self._check_units(now)
         cards = read_cards(self.nvsmi)
         procs = read_procs(cards, self.nvsmi) if cards else None
@@ -429,20 +413,17 @@ class Daemon:
         whole = max(c.total_gb for c in cards.values())
         cap = {i: c.total_gb for i, c in cards.items()}
         running = {j["id"]: j for j in self.jobs.values() if j["state"] == "running"}
-        old = self.transition.running()
-        pic = self.holders.read(now, procs, running, old)
+        pic = self.holders.read(now, procs, running)
         idle = {i for i, c in cards.items()
                 if c.used_mb <= IDLE_MB and not any(u[1] == i for u in pic.untracked)}
         free = {i: (c.total_gb if i in idle else c.free_gb) for i, c in cards.items()}
-        old_running = [r for r in (legacy.as_running(e, whole) for e in old) if r]
         mine = [as_running(j, whole) for j in running.values()]
         # A card running a job is never empty, however little the job has
         # allocated yet, so a job without -m (a card to itself) needs a card with
-        # no job on it. That holds for the previous gpuq's jobs at cutover and for use
-        # outside gpuq too. You own your allocated card: more of your own jobs
+        # no job on it. That holds for use outside gpuq too. You own your allocated card: more of your own jobs
         # with -m join it whenever that much VRAM is measured free (§4.5),
         # whatever its first job asked for, and fair-share charges the card once.
-        for r in mine + old_running + pic.holding:
+        for r in mine + pic.holding:
             for c in r.cards:
                 free[c] = min(free[c], cap[c] - 1.0)
         # A waiting attached job whose client has not come back after a restart
@@ -463,15 +444,15 @@ class Daemon:
                 join_ends[j["id"]] = end
                 queue.append(as_job(j, whole, (end - now) / HOUR))
         self.ledger.refresh()
-        use = usage(self.ledger.runs, mine + old_running, now)
-        p = plan(now, cap, mine + old_running + pic.holding, queue, use, free, self.promised)
+        use = usage(self.ledger.runs, mine, now)
+        p = plan(now, cap, mine + pic.holding, queue, use, free, self.promised)
         self.promised = tuple(r.job_id for r in p.reservations)
         for s in p.starts:
             self._launch(self.jobs[int(s.job_id)], s.cards, cards, now,
                          join_ends.get(int(s.job_id)))
         self.view = explain.View(now, cards, cap=cap, free=free, usage=use, plan=p,
-                                 queue=queue, old=old, untracked=pic.untracked,
-                                 held=mine + old_running + pic.holding)
+                                 queue=queue, untracked=pic.untracked,
+                                 held=mine + pic.holding)
         self._first_outcomes()
         self._watch(now, pic)
         self.save()

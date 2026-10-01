@@ -44,9 +44,8 @@ index.html     the docs viewer
 .nojekyll      serve raw .md files
 assets/        app.js (tabs, router, rendering; MANIFEST), style.css, vendor/ (marked, highlight.js)
 docs/          the documentation pages
-gpuq/          gpuq: the Reference page (README.md); v3's code as installed (scheduler/,
-               gpuqd/, gpuqcli/, install_v3.sh; its tests stay in the gpuq repo); and the
-               pre-v3 gpuq (userspace.py, installers, tests) until it is retired
+gpuq/          gpuq: the Reference page (README.md) and the code as installed (scheduler/,
+               gpuqd/, gpuqcli/, install_v3.sh); its tests stay in the gpuq repo
 examples/      runnable training examples and configs
 scripts/       admin scripts: accounts, disk quotas, scratch cleanup (see scripts/README.md)
 ```
