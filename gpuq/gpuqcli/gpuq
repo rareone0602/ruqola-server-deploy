@@ -1,0 +1,9 @@
+#!/usr/bin/python3 -I
+# gpuq v3 client. Its code is in /usr/local/lib/gpuq-v3 (install_v3.sh);
+# -I keeps your Python environment (a venv, PYTHONPATH) from changing gpuq.
+import sys
+
+sys.path.insert(0, "/usr/local/lib/gpuq-v3")
+from gpuqcli.main import main  # noqa: E402
+
+sys.exit(main())

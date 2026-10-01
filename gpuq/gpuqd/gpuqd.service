@@ -1,0 +1,25 @@
+[Unit]
+Description=gpuq: the GPU queue (gpuqd, the one owner of its state)
+After=nvidia-persistenced.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m gpuqd.daemon
+WorkingDirectory=/usr/local/lib/gpuq-v3
+Environment=PYTHONPATH=/usr/local/lib/gpuq-v3
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=2
+
+# Restarting gpuqd never touches a job: each job is its own unit
+# (gpuq-job-ID.service in gpuq.slice), and the systemd-run helpers that
+# forward an attached job's or a shell's terminal live on until their job ends.
+KillMode=process
+
+# /run/gpuq/gpuqd.sock (mode 0666, open to every account) and /var/lib/gpuq.
+RuntimeDirectory=gpuq
+RuntimeDirectoryPreserve=yes
+StateDirectory=gpuq
+
+[Install]
+WantedBy=multi-user.target
